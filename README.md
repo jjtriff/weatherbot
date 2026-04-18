@@ -122,6 +122,73 @@ This data is used for self-calibration — the bot learns forecast accuracy per 
 
 ---
 
-## Disclaimer
+## Docker Migration (recommended)
+
+This is the easiest way to move WeatherBot to another server with consistent runtime behavior.
+
+### Files added
+- `Dockerfile`
+- `docker-compose.yml`
+- `requirements.txt`
+- `.dockerignore`
+- `deploy.sh`
+
+### 1) Copy repo to new server
+```bash
+git clone https://github.com/alteregoeth-ai/weatherbot.git
+cd weatherbot
+```
+
+### 2) Add runtime secrets and config
+- Put your wallet/env values in `.env`
+- Keep your strategy settings in `config.json`
+
+Required `.env` keys:
+```bash
+PK=...
+WALLET=0x...
+SIG_TYPE=0
+# optional
+# POLYGON_RPC=https://1rpc.io/matic
+```
+
+### 3) Run with Docker Compose
+```bash
+./deploy.sh
+```
+
+Or manually:
+```bash
+docker compose build --pull
+docker compose up -d
+```
+
+### 4) Verify
+```bash
+docker compose ps
+docker compose logs -f --tail=100
+```
+
+### 5) Useful commands
+```bash
+# status command
+docker compose exec weatherbot python bot_v2.py status
+
+# full report
+docker compose exec weatherbot python bot_v2.py report
+
+# restart
+docker compose restart weatherbot
+
+# stop
+docker compose down
+```
+
+### Data persistence
+- Bot state is persisted on host under `./data` (mounted into container at `/app/data`).
+- `config.json` is mounted from host, so edits are applied after restart.
+
+### Important
+If you see `CLOB geoblocked (HTTP 403)`, the new host/IP is in a restricted region for Polymarket trading. Docker does not bypass this; server egress location determines access.
 
 This is not financial advice. Prediction markets carry real risk. Run the simulation thoroughly before committing real capital.

@@ -1,0 +1,21 @@
+services:
+  weatherbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: weatherbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    working_dir: /app
+    command: ["python", "bot_v2.py", "run"]
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json
+    # Optional: keep local timezone inside container
+    environment:
+      - TZ=UTC
+
+# Notes:
+# - .env should include PK, WALLET, SIG_TYPE, and any optional POLYGON_RPC override.
+# - config.json stays on host and is mounted read-only.

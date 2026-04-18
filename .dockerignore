@@ -1,0 +1,24 @@
+# Python cache/venv
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+
+# Git/IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Runtime artifacts
+data/
+*.log
+
+# Secrets/local env
+.env
+
+# Misc
+.DS_Store

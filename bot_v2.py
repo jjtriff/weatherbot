@@ -13,6 +13,8 @@ Usage:
 """
 
 import re
+import os
+import ast
 import sys
 import json
 import math
@@ -20,6 +22,22 @@ import time
 import requests
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from dotenv import load_dotenv
+
+try:
+    from py_clob_client.client import ClobClient
+    from py_clob_client.clob_types import OrderArgs, OrderType, BalanceAllowanceParams, AssetType
+    from py_clob_client.order_builder.constants import BUY, SELL
+    _CLOB_AVAILABLE = True
+except Exception:
+    ClobClient = None
+    OrderArgs = None
+    OrderType = None
+    BalanceAllowanceParams = None
+    AssetType = None
+    BUY = "BUY"
+    SELL = "SELL"
+    _CLOB_AVAILABLE = False
 
 # =============================================================================
 # CONFIG
@@ -40,6 +58,7 @@ MAX_SLIPPAGE     = _cfg.get("max_slippage", 0.03)  # max allowed ask-bid spread
 SCAN_INTERVAL    = _cfg.get("scan_interval", 3600)   # every hour
 CALIBRATION_MIN  = _cfg.get("calibration_min", 30)
 VC_KEY           = _cfg.get("vc_key", "")
+MODE             = str(_cfg.get("mode", "paper")).lower()  # paper | live
 
 SIGMA_F = 2.0
 SIGMA_C = 1.2
@@ -50,6 +69,19 @@ STATE_FILE       = DATA_DIR / "state.json"
 MARKETS_DIR      = DATA_DIR / "markets"
 MARKETS_DIR.mkdir(exist_ok=True)
 CALIBRATION_FILE = DATA_DIR / "calibration.json"
+
+# Runtime env (for live mode)
+load_dotenv(str(Path(__file__).resolve().parent / ".env"))
+PK = os.getenv("PK", "")
+WALLET = os.getenv("WALLET", "")
+SIG_TYPE = int(os.getenv("SIG_TYPE", "0") or 0)
+CLOB_HOST = "https://clob.polymarket.com"
+CHAIN_ID = 137
+
+_clob_client_instance = None
+_api_creds_loaded = False
+_live_trading_disabled = False
+_live_trading_disabled_reason = ""
 
 LOCATIONS = {
     "nyc":          {"lat": 40.7772,  "lon":  -73.8726, "name": "New York City", "station": "KLGA", "unit": "F", "region": "us"},
@@ -340,6 +372,214 @@ def in_bucket(forecast, t_low, t_high):
         return round(float(forecast)) == round(t_low)
     return t_low <= float(forecast) <= t_high
 
+
+def _parse_list_field(value):
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            return ast.literal_eval(value)
+        except Exception:
+            return []
+    return []
+
+
+def _clob_client():
+    global _clob_client_instance, _api_creds_loaded, _live_trading_disabled, _live_trading_disabled_reason
+
+    if not _CLOB_AVAILABLE:
+        raise RuntimeError("py-clob-client is not available")
+    if not PK or not WALLET:
+        raise RuntimeError("PK/WALLET missing in .env")
+    if _live_trading_disabled:
+        raise RuntimeError(f"Live trading disabled: {_live_trading_disabled_reason}")
+
+    # Defensive recovery: if stale runtime state ever corrupts the singleton,
+    # rebuild the client instead of crashing live exits.
+    if (
+        _clob_client_instance is None
+        or not hasattr(_clob_client_instance, "create_or_derive_api_creds")
+        or not hasattr(_clob_client_instance, "set_api_creds")
+    ):
+        _clob_client_instance = ClobClient(
+            CLOB_HOST,
+            chain_id=CHAIN_ID,
+            key=PK,
+            signature_type=SIG_TYPE,
+            funder=WALLET,
+        )
+        _api_creds_loaded = False
+
+    if not _api_creds_loaded:
+        creds = _clob_client_instance.create_or_derive_api_creds()
+        _clob_client_instance.set_api_creds(creds)
+        _api_creds_loaded = True
+    return _clob_client_instance
+
+
+def _resolve_yes_token_id(market_id: str) -> str:
+    r = requests.get(f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=(5, 8))
+    r.raise_for_status()
+    mdata = r.json()
+
+    token_ids = _parse_list_field(mdata.get("clobTokenIds"))
+    outcomes = _parse_list_field(mdata.get("outcomes"))
+    if not token_ids or len(token_ids) < 1:
+        raise RuntimeError(f"No clobTokenIds for market {market_id}")
+
+    # By convention outcome index 0 is Yes, 1 is No in Gamma payload.
+    yes_token_id = str(token_ids[0])
+    if outcomes and len(outcomes) > 0 and str(outcomes[0]).lower() != "yes":
+        raise RuntimeError(f"Unexpected outcomes ordering for market {market_id}: {outcomes}")
+    return yes_token_id
+
+
+def _is_geoblock_error(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "status_code=403" in s and "trading restricted in your region" in s
+
+
+def _handle_live_order_error(exc: Exception, context: str):
+    global _live_trading_disabled, _live_trading_disabled_reason
+    if _is_geoblock_error(exc):
+        _live_trading_disabled = True
+        _live_trading_disabled_reason = "CLOB geoblocked (HTTP 403)"
+        print(f"  [LIVE-DISABLED] {context}: {_live_trading_disabled_reason}")
+
+
+def _is_live_disabled_error(exc: Exception) -> bool:
+    return "live trading disabled" in str(exc).lower()
+
+
+def _get_live_wallet_usdc_balance() -> float:
+    c = _clob_client()
+    params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=SIG_TYPE)
+    ba = c.get_balance_allowance(params)
+    # USDC has 6 decimals
+    raw = int(ba.get("balance", "0"))
+    return round(raw / 1_000_000, 6)
+
+
+def _get_onchain_wallet_usdc_balance() -> float:
+    try:
+        from web3 import Web3
+
+        rpc = os.getenv("POLYGON_RPC", "https://1rpc.io/matic")
+        w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 8}))
+        token = w3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")  # USDC.e
+        wallet = w3.to_checksum_address(WALLET)
+        abi = [
+            {
+                "constant": True,
+                "inputs": [{"name": "account", "type": "address"}],
+                "name": "balanceOf",
+                "outputs": [{"name": "", "type": "uint256"}],
+                "stateMutability": "view",
+                "type": "function",
+            }
+        ]
+        c = w3.eth.contract(address=token, abi=abi)
+        raw = int(c.functions.balanceOf(wallet).call())
+        return round(raw / 1_000_000, 6)
+    except Exception as e:
+        raise RuntimeError(f"On-chain USDC balance read failed: {e}")
+
+
+def _sync_live_balance_into_state(state: dict):
+    """In live mode, local ledger balance should mirror real USDC.
+    Prefer CLOB collateral balance; if geoblocked/disabled, fallback to on-chain USDC balance.
+    """
+    if MODE != "live":
+        return state
+    try:
+        live_bal = _get_live_wallet_usdc_balance()
+    except Exception as e:
+        if _is_live_disabled_error(e):
+            try:
+                live_bal = _get_onchain_wallet_usdc_balance()
+            except Exception as e2:
+                print(f"  [LIVE-WARN] Could not sync live balance (fallback failed): {e2}")
+                return state
+        else:
+            print(f"  [LIVE-WARN] Could not sync live balance: {e}")
+            return state
+
+    state["balance"] = live_bal
+    state["peak_balance"] = max(float(state.get("peak_balance", live_bal)), live_bal)
+    return state
+
+
+def place_live_buy_order(market_id: str, yes_price: float, size_usdc: float):
+    """Places a real CLOB BUY order on the YES token for a market.
+    Returns dict with success flag and details.
+    """
+    c = _clob_client()
+    yes_token_id = _resolve_yes_token_id(market_id)
+
+    # Re-price from orderbook so order can be filled in live mode.
+    ob = c.get_order_book(yes_token_id)
+    best_ask = float(ob.asks[0].price) if ob.asks else float(yes_price)
+    price = round(best_ask, 3)
+    if price <= 0 or price >= 1:
+        raise RuntimeError(f"Invalid order price {price} for market {market_id}")
+
+    shares = round(size_usdc / price, 2)
+    if shares <= 0:
+        raise RuntimeError(f"Computed non-positive shares for size {size_usdc} at price {price}")
+
+    order = c.create_order(
+        OrderArgs(
+            token_id=yes_token_id,
+            price=price,
+            size=shares,
+            side=BUY,
+        )
+    )
+    posted = c.post_order(order, OrderType.FOK)
+
+    return {
+        "market_id": market_id,
+        "token_id": yes_token_id,
+        "price": price,
+        "shares": shares,
+        "posted": posted,
+    }
+
+
+def place_live_sell_order(market_id: str, shares: float, fallback_token_id: str = None):
+    """Places a real CLOB SELL order on the YES token for a market.
+    Uses best bid and FOK to avoid hanging orders.
+    """
+    c = _clob_client()
+    yes_token_id = str(fallback_token_id) if fallback_token_id else _resolve_yes_token_id(market_id)
+
+    ob = c.get_order_book(yes_token_id)
+    best_bid = float(ob.bids[0].price) if ob.bids else None
+    if best_bid is None or best_bid <= 0 or best_bid >= 1:
+        raise RuntimeError(f"No valid best bid to sell for market {market_id}")
+
+    qty = round(float(shares), 2)
+    if qty <= 0:
+        raise RuntimeError(f"Invalid sell size {shares} for market {market_id}")
+
+    order = c.create_order(
+        OrderArgs(
+            token_id=yes_token_id,
+            price=round(best_bid, 3),
+            size=qty,
+            side=SELL,
+        )
+    )
+    posted = c.post_order(order, OrderType.FOK)
+
+    return {
+        "market_id": market_id,
+        "token_id": yes_token_id,
+        "price": round(best_bid, 3),
+        "shares": qty,
+        "posted": posted,
+    }
+
 # =============================================================================
 # MARKET DATA STORAGE
 # Each market is stored in a separate file: data/markets/{city}_{date}.json
@@ -394,8 +634,9 @@ def new_market(city_slug, date_str, event, hours):
 
 def load_state():
     if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    return {
+        s = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return _sync_live_balance_into_state(s)
+    s = {
         "balance":          BALANCE,
         "starting_balance": BALANCE,
         "total_trades":     0,
@@ -403,6 +644,11 @@ def load_state():
         "losses":           0,
         "peak_balance":     BALANCE,
     }
+    if MODE == "live":
+        s = _sync_live_balance_into_state(s)
+        if "starting_balance" not in s or float(s.get("starting_balance", 0)) <= 0:
+            s["starting_balance"] = s["balance"]
+    return s
 
 def save_state(state):
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -560,16 +806,42 @@ def scan_and_update():
 
                     # Check stop
                     if current_price <= stop:
-                        pnl = round((current_price - entry) * pos["shares"], 2)
-                        balance += pos["cost"] + pnl
-                        pos["closed_at"]    = snap.get("ts")
-                        pos["close_reason"] = "stop_loss" if current_price < entry else "trailing_stop"
-                        pos["exit_price"]   = current_price
-                        pos["pnl"]          = pnl
-                        pos["status"]       = "closed"
-                        closed += 1
-                        reason = "STOP" if current_price < entry else "TRAILING BE"
-                        print(f"  [{reason}] {loc['name']} {date} | entry ${entry:.3f} exit ${current_price:.3f} | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+                        if MODE == "live":
+                            try:
+                                sold = place_live_sell_order(
+                                    market_id=pos["market_id"],
+                                    shares=pos["shares"],
+                                    fallback_token_id=pos.get("token_id"),
+                                )
+                                exit_price = float(sold["price"])
+                                pnl = round((exit_price - entry) * pos["shares"], 2)
+                                if MODE != "live":
+                                    balance += pos["cost"] + pnl
+                                pos["closed_at"]    = snap.get("ts")
+                                pos["close_reason"] = "stop_loss" if exit_price < entry else "trailing_stop"
+                                pos["exit_price"]   = exit_price
+                                pos["pnl"]          = pnl
+                                pos["status"]       = "closed"
+                                pos["live_exit_order"] = sold.get("posted")
+                                closed += 1
+                                reason = "LIVE-STOP" if exit_price < entry else "LIVE-TRAILING BE"
+                                print(f"  [{reason}] {loc['name']} {date} | entry ${entry:.3f} exit ${exit_price:.3f} | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+                            except Exception as e:
+                                _handle_live_order_error(e, f"{loc['name']} {date} stop exit")
+                                if not (_is_live_disabled_error(e) or _is_geoblock_error(e)):
+                                    print(f"  [LIVE-EXIT-WARN] {loc['name']} {date} stop trigger but sell failed: {e}")
+                        else:
+                            pnl = round((current_price - entry) * pos["shares"], 2)
+                            if MODE != "live":
+                                balance += pos["cost"] + pnl
+                            pos["closed_at"]    = snap.get("ts")
+                            pos["close_reason"] = "stop_loss" if current_price < entry else "trailing_stop"
+                            pos["exit_price"]   = current_price
+                            pos["pnl"]          = pnl
+                            pos["status"]       = "closed"
+                            closed += 1
+                            reason = "STOP" if current_price < entry else "TRAILING BE"
+                            print(f"  [{reason}] {loc['name']} {date} | entry ${entry:.3f} exit ${current_price:.3f} | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
 
             # --- CLOSE POSITION if forecast shifted 2+ degrees ---
             if mkt.get("position") and forecast_temp is not None:
@@ -588,15 +860,40 @@ def scan_and_update():
                             current_price = o["price"]
                             break
                     if current_price is not None:
-                        pnl = round((current_price - pos["entry_price"]) * pos["shares"], 2)
-                        balance += pos["cost"] + pnl
-                        mkt["position"]["closed_at"]    = snap.get("ts")
-                        mkt["position"]["close_reason"] = "forecast_changed"
-                        mkt["position"]["exit_price"]   = current_price
-                        mkt["position"]["pnl"]          = pnl
-                        mkt["position"]["status"]       = "closed"
-                        closed += 1
-                        print(f"  [CLOSE] {loc['name']} {date} — forecast changed | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+                        if MODE == "live":
+                            try:
+                                sold = place_live_sell_order(
+                                    market_id=pos["market_id"],
+                                    shares=pos["shares"],
+                                    fallback_token_id=pos.get("token_id"),
+                                )
+                                exit_price = float(sold["price"])
+                                pnl = round((exit_price - pos["entry_price"]) * pos["shares"], 2)
+                                if MODE != "live":
+                                    balance += pos["cost"] + pnl
+                                mkt["position"]["closed_at"]    = snap.get("ts")
+                                mkt["position"]["close_reason"] = "forecast_changed"
+                                mkt["position"]["exit_price"]   = exit_price
+                                mkt["position"]["pnl"]          = pnl
+                                mkt["position"]["status"]       = "closed"
+                                mkt["position"]["live_exit_order"] = sold.get("posted")
+                                closed += 1
+                                print(f"  [LIVE-CLOSE] {loc['name']} {date} — forecast changed | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+                            except Exception as e:
+                                _handle_live_order_error(e, f"{loc['name']} {date} forecast exit")
+                                if not (_is_live_disabled_error(e) or _is_geoblock_error(e)):
+                                    print(f"  [LIVE-EXIT-WARN] {loc['name']} {date} forecast-exit trigger but sell failed: {e}")
+                        else:
+                            pnl = round((current_price - pos["entry_price"]) * pos["shares"], 2)
+                            if MODE != "live":
+                                balance += pos["cost"] + pnl
+                            mkt["position"]["closed_at"]    = snap.get("ts")
+                            mkt["position"]["close_reason"] = "forecast_changed"
+                            mkt["position"]["exit_price"]   = current_price
+                            mkt["position"]["pnl"]          = pnl
+                            mkt["position"]["status"]       = "closed"
+                            closed += 1
+                            print(f"  [CLOSE] {loc['name']} {date} — forecast changed | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
 
             # --- OPEN POSITION ---
             if not mkt.get("position") and forecast_temp is not None and hours >= MIN_HOURS:
@@ -675,14 +972,35 @@ def scan_and_update():
                         print(f"  [WARN] Could not fetch real ask for {best_signal['market_id']}: {e}")
 
                     if not skip_position and best_signal["entry_price"] < MAX_PRICE:
-                        balance -= best_signal["cost"]
-                        mkt["position"] = best_signal
-                        state["total_trades"] += 1
-                        new_pos += 1
-                        bucket_label = f"{best_signal['bucket_low']}-{best_signal['bucket_high']}{unit_sym}"
-                        print(f"  [BUY]  {loc['name']} {horizon} {date} | {bucket_label} | "
-                              f"${best_signal['entry_price']:.3f} | EV {best_signal['ev']:+.2f} | "
-                              f"${best_signal['cost']:.2f} ({best_signal['forecast_src'].upper()})")
+                        if MODE == "live":
+                            try:
+                                live = place_live_buy_order(
+                                    market_id=best_signal["market_id"],
+                                    yes_price=best_signal["entry_price"],
+                                    size_usdc=best_signal["cost"],
+                                )
+                                best_signal["token_id"] = live["token_id"]
+                                best_signal["entry_price"] = float(live["price"])
+                                best_signal["shares"] = float(live["shares"])
+                                best_signal["cost"] = round(best_signal["entry_price"] * best_signal["shares"], 2)
+                                best_signal["live_order"] = live.get("posted")
+                            except Exception as e:
+                                _handle_live_order_error(e, f"{loc['name']} {date} live buy")
+                                if not (_is_live_disabled_error(e) or _is_geoblock_error(e)):
+                                    print(f"  [LIVE-SKIP] {loc['name']} {date} — order failed: {e}")
+                                skip_position = True
+
+                        if not skip_position:
+                            if MODE != "live":
+                                balance -= best_signal["cost"]
+                            mkt["position"] = best_signal
+                            state["total_trades"] += 1
+                            new_pos += 1
+                            bucket_label = f"{best_signal['bucket_low']}-{best_signal['bucket_high']}{unit_sym}"
+                            tag = "[LIVE] BUY" if MODE == "live" else "[BUY]"
+                            print(f"  {tag}  {loc['name']} {horizon} {date} | {bucket_label} | "
+                                  f"${best_signal['entry_price']:.3f} | EV {best_signal['ev']:+.2f} | "
+                                  f"${best_signal['cost']:.2f} ({best_signal['forecast_src'].upper()})")
 
             # Market closed by time
             if hours < 0.5 and mkt["status"] == "open":
@@ -741,6 +1059,7 @@ def scan_and_update():
 
     state["balance"]      = round(balance, 2)
     state["peak_balance"] = max(state.get("peak_balance", balance), balance)
+    state = _sync_live_balance_into_state(state)
     save_state(state)
 
     # Run calibration if enough data collected
@@ -773,6 +1092,12 @@ def print_status():
     print(f"  WEATHERBET — STATUS")
     print(f"{'='*55}")
     print(f"  Balance:     ${bal:,.2f}  (start ${start:,.2f}, {'+'if ret_pct>=0 else ''}{ret_pct:.1f}%)")
+    if MODE == 'live' and _live_trading_disabled:
+        print(f"  Mode:        LIVE-DISABLED ({_live_trading_disabled_reason})")
+    elif MODE == 'live':
+        print("  Mode:        LIVE")
+    else:
+        print("  Mode:        PAPER")
     print(f"  Trades:      {total} | W: {wins} | L: {losses} | WR: {wins/total:.0%}" if total else "  No trades yet")
     print(f"  Open:        {len(open_pos)}")
     print(f"  Resolved:    {len(resolved)}")
@@ -860,7 +1185,7 @@ def print_report():
 MONITOR_INTERVAL = 600  # monitor positions every 10 minutes
 
 def monitor_positions():
-    """Quick stop check on open positions without full scan."""
+    """Quick stop/take check on open positions without full scan."""
     markets  = load_all_markets()
     open_pos = [m for m in markets if m.get("position") and m["position"].get("status") == "open"]
     if not open_pos:
@@ -923,27 +1248,62 @@ def monitor_positions():
         stop_triggered = current_price <= stop
 
         if take_triggered or stop_triggered:
-            pnl = round((current_price - entry) * pos["shares"], 2)
-            balance += pos["cost"] + pnl
-            pos["closed_at"]    = datetime.now(timezone.utc).isoformat()
-            if take_triggered:
-                pos["close_reason"] = "take_profit"
-                reason = "TAKE"
-            elif current_price < entry:
-                pos["close_reason"] = "stop_loss"
-                reason = "STOP"
+            if MODE == "live":
+                try:
+                    sold = place_live_sell_order(
+                        market_id=mid,
+                        shares=pos["shares"],
+                        fallback_token_id=pos.get("token_id"),
+                    )
+                    exit_price = float(sold["price"])
+                    pnl = round((exit_price - entry) * pos["shares"], 2)
+                    if MODE != "live":
+                        balance += pos["cost"] + pnl
+                    pos["closed_at"]    = datetime.now(timezone.utc).isoformat()
+                    if take_triggered:
+                        pos["close_reason"] = "take_profit"
+                        reason = "LIVE-TAKE"
+                    elif exit_price < entry:
+                        pos["close_reason"] = "stop_loss"
+                        reason = "LIVE-STOP"
+                    else:
+                        pos["close_reason"] = "trailing_stop"
+                        reason = "LIVE-TRAILING BE"
+                    pos["exit_price"]   = exit_price
+                    pos["pnl"]          = pnl
+                    pos["status"]       = "closed"
+                    pos["live_exit_order"] = sold.get("posted")
+                    closed += 1
+                    print(f"  [{reason}] {city_name} {mkt['date']} | entry ${entry:.3f} exit ${exit_price:.3f} | {hours_left:.0f}h left | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+                    save_market(mkt)
+                except Exception as e:
+                    _handle_live_order_error(e, f"{city_name} {mkt['date']} monitor exit")
+                    if not (_is_live_disabled_error(e) or _is_geoblock_error(e)):
+                        print(f"  [LIVE-EXIT-WARN] {city_name} {mkt['date']} monitor exit trigger but sell failed: {e}")
             else:
-                pos["close_reason"] = "trailing_stop"
-                reason = "TRAILING BE"
-            pos["exit_price"]   = current_price
-            pos["pnl"]          = pnl
-            pos["status"]       = "closed"
-            closed += 1
-            print(f"  [{reason}] {city_name} {mkt['date']} | entry ${entry:.3f} exit ${current_price:.3f} | {hours_left:.0f}h left | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
-            save_market(mkt)
+                pnl = round((current_price - entry) * pos["shares"], 2)
+                if MODE != "live":
+                    balance += pos["cost"] + pnl
+                pos["closed_at"]    = datetime.now(timezone.utc).isoformat()
+                if take_triggered:
+                    pos["close_reason"] = "take_profit"
+                    reason = "TAKE"
+                elif current_price < entry:
+                    pos["close_reason"] = "stop_loss"
+                    reason = "STOP"
+                else:
+                    pos["close_reason"] = "trailing_stop"
+                    reason = "TRAILING BE"
+                pos["exit_price"]   = current_price
+                pos["pnl"]          = pnl
+                pos["status"]       = "closed"
+                closed += 1
+                print(f"  [{reason}] {city_name} {mkt['date']} | entry ${entry:.3f} exit ${current_price:.3f} | {hours_left:.0f}h left | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+                save_market(mkt)
 
     if closed:
         state["balance"] = round(balance, 2)
+        state = _sync_live_balance_into_state(state)
         save_state(state)
 
     return closed
@@ -960,6 +1320,13 @@ def run_loop():
     print(f"  Balance:    ${BALANCE:,.0f} | Max bet: ${MAX_BET}")
     print(f"  Scan:       {SCAN_INTERVAL//60} min | Monitor: {MONITOR_INTERVAL//60} min")
     print(f"  Sources:    ECMWF + HRRR(US) + METAR(D+0)")
+    if MODE == 'live' and _live_trading_disabled:
+        mode_label = f"LIVE-DISABLED ({_live_trading_disabled_reason})"
+    elif MODE == 'live':
+        mode_label = 'LIVE (real orders via CLOB)'
+    else:
+        mode_label = 'PAPER (simulated)'
+    print(f"  Mode:       {mode_label}")
     print(f"  Data:       {DATA_DIR.resolve()}")
     print(f"  Ctrl+C to stop\n")
 
