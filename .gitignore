@@ -148,6 +148,9 @@ venv.bak/
 data/
 .weatherbot_monitor_state.json
 
+# WeatherBot v3 local state
+/data/v3/
+
 # Spyder project settings
 .spyderproject
 .spyproject
