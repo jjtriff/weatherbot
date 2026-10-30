@@ -61,11 +61,13 @@ class PaperWeatherBot:
                 if not isinstance(market, Mapping) or market.get("closed") is True:
                     continue
                 slug = str(market.get("slug") or "").strip()
-                question = str(market.get("question") or market.get("title") or "").strip()
-                if not slug or not question:
+                question = str(market.get("question") or "").strip()
+                title = str(market.get("title") or "").strip()
+                contract_text = " ".join(part for part in (question, title) if part)
+                if not slug or not contract_text:
                     continue
                 try:
-                    parse_temperature_bucket(question)
+                    parse_temperature_bucket(contract_text)
                 except UnsupportedWeatherMarket:
                     continue
                 discovered += 1

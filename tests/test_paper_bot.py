@@ -20,11 +20,13 @@ class FakeGateway:
                     {
                         "slug": "paris-14c",
                         "question": "Will the highest temperature in Paris be 14°C on October 31?",
+                        "title": "14°C",
                         "closed": False,
                     },
                     {
                         "slug": "paris-15c",
                         "question": "Will the highest temperature in Paris be 15°C on October 31?",
+                        "title": "15°C",
                         "closed": False,
                     },
                     {

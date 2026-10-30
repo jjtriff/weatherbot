@@ -12,6 +12,7 @@ class UnsupportedWeatherMarket(ValueError):
 
 _NUMBER = r"(-?\d+(?:\.\d+)?)"
 _UNIT = r"(?:°\s*[CF]|\s*[CF])"
+_OPTIONAL_UNIT = r"(?:°\s*[CF]|\s*[CF])?"
 
 
 def parse_temperature_bucket(question: str) -> TemperatureBucket:
@@ -20,19 +21,27 @@ def parse_temperature_bucket(question: str) -> TemperatureBucket:
     if not re.search(r"highest temperature", normalized, re.IGNORECASE):
         raise UnsupportedWeatherMarket("not a supported high-temperature market")
 
-    below = re.search(rf"{_NUMBER}{_UNIT}\s+or\s+below", normalized, re.IGNORECASE)
+    below = re.search(rf"{_NUMBER}{_OPTIONAL_UNIT}\s+or\s+below", normalized, re.IGNORECASE)
     if below:
         return TemperatureBucket.below_or_equal(Decimal(below.group(1)))
 
-    above = re.search(rf"{_NUMBER}{_UNIT}\s+or\s+higher", normalized, re.IGNORECASE)
+    above = re.search(
+        rf"{_NUMBER}{_OPTIONAL_UNIT}\s+or\s+(?:higher|above)", normalized, re.IGNORECASE
+    )
     if above:
         return TemperatureBucket.above_or_equal(Decimal(above.group(1)))
 
-    between = re.search(
-        rf"between\s+{_NUMBER}\s*-\s*{_NUMBER}{_UNIT}", normalized, re.IGNORECASE
-    )
+    between = re.search(rf"between\s+{_NUMBER}\s*-\s*{_NUMBER}{_UNIT}", normalized, re.IGNORECASE)
     if between:
         return TemperatureBucket(lower=Decimal(between.group(1)), upper=Decimal(between.group(2)))
+
+    titled_range = re.search(
+        rf"{_NUMBER}\s+to\s+{_NUMBER}{_OPTIONAL_UNIT}", normalized, re.IGNORECASE
+    )
+    if titled_range:
+        return TemperatureBucket(
+            lower=Decimal(titled_range.group(1)), upper=Decimal(titled_range.group(2))
+        )
 
     exact = re.search(rf"be\s+{_NUMBER}{_UNIT}\s+on\b", normalized, re.IGNORECASE)
     if exact:

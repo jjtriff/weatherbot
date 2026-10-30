@@ -29,10 +29,20 @@ from weatherbot.domain import TemperatureBucket
         ),
     ],
 )
-def test_parse_supported_temperature_contracts(
-    question: str, expected: TemperatureBucket
-) -> None:
+def test_parse_supported_temperature_contracts(question: str, expected: TemperatureBucket) -> None:
     assert parse_temperature_bucket(question) == expected
+
+
+def test_parses_polymarket_us_daily_high_bucket_titles() -> None:
+    assert parse_temperature_bucket(
+        "Highest temperature in Philadelphia on November 1? 61 or below"
+    ) == TemperatureBucket.below_or_equal(Decimal(61))
+    assert parse_temperature_bucket(
+        "Highest temperature in Philadelphia on November 1? 62 to 63"
+    ) == TemperatureBucket(lower=Decimal(62), upper=Decimal(63))
+    assert parse_temperature_bucket(
+        "Highest temperature in Philadelphia on November 1? 70 or above"
+    ) == TemperatureBucket.above_or_equal(Decimal(70))
 
 
 def test_rejects_ambiguous_weather_contract() -> None:

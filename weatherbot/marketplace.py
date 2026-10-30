@@ -55,7 +55,9 @@ class PolymarketUSGateway:
 
     def list_events(self) -> list[Mapping[str, object]]:
         try:
-            response = self._client.events.list({"limit": 100, "active": True, "closed": False})
+            response = self._client.search.query(
+                {"query": "weather", "limit": 100, "status": "active"}
+            )
             if isinstance(response, Mapping):
                 events = response.get("events", [])
             else:

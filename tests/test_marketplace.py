@@ -31,6 +31,15 @@ class FakeEvents:
         return {"events": [{"slug": "paris-weather", "title": "Paris weather"}]}
 
 
+class FakeSearch:
+    def __init__(self) -> None:
+        self.params: object | None = None
+
+    def query(self, params: object | None = None) -> dict[str, object]:
+        self.params = params
+        return {"events": [{"slug": "paris-weather", "title": "Paris weather"}]}
+
+
 class FakeOrders:
     def __init__(self) -> None:
         self.created: list[dict[str, object]] = []
@@ -44,6 +53,7 @@ class FakeClient:
     def __init__(self) -> None:
         self.markets = FakeMarkets()
         self.events = FakeEvents()
+        self.search = FakeSearch()
         self.orders = FakeOrders()
         self.account = SimpleNamespace(balances=lambda: {"balances": []})
         self.portfolio = SimpleNamespace(
@@ -66,14 +76,14 @@ def test_gateway_uses_sdk_bbo_shape() -> None:
     assert client.markets.bbo_calls == ["paris-14c"]
 
 
-def test_gateway_discovers_only_active_open_events() -> None:
+def test_gateway_discovers_active_weather_events_through_sdk_search() -> None:
     client = FakeClient()
     gateway = PolymarketUSGateway(client=client, live_enabled=False)
 
     events = gateway.list_events()
 
     assert events == [{"slug": "paris-weather", "title": "Paris weather"}]
-    assert client.events.params == {"limit": 100, "active": True, "closed": False}
+    assert client.search.params == {"query": "weather", "limit": 100, "status": "active"}
 
 
 def test_public_gateway_cannot_create_orders() -> None:
