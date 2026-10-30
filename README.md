@@ -192,3 +192,29 @@ docker compose down
 If you see `CLOB geoblocked (HTTP 403)`, the new host/IP is in a restricted region for Polymarket trading. Docker does not bypass this; server egress location determines access.
 
 This is not financial advice. Prediction markets carry real risk. Run the simulation thoroughly before committing real capital.
+
+---
+
+## WeatherBot v3 (paper-only)
+
+The new implementation lives in `weatherbot/` and uses the official `polymarket-us` SDK for every Polymarket US interaction. It preserves v1/v2 files and their JSON state; v3 stores its independent audit ledger in `data/v3/weatherbot.sqlite3`.
+
+Install the v3 package and developer checks:
+
+```bash
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pytest -q
+```
+
+Run one paper cycle or a continuous hourly runner:
+
+```bash
+WEATHERBOT_MODE=paper .venv/bin/python -m weatherbot.cli paper-scan --stake 1.00
+WEATHERBOT_MODE=paper .venv/bin/python -m weatherbot.cli paper-run --interval 3600 --stake 1.00
+WEATHERBOT_MODE=paper .venv/bin/python -m weatherbot.cli paper-status
+```
+
+Paper mode opens `$1.00` hypothetical positions on every supported active high-temperature bucket it discovers. It intentionally bypasses EV, liquidity, price, spread, Kelly, and exposure filters so results can be learned from the full paper-trade set. It never sends an order or authenticates with Polymarket US.
+
+Live mode is not implemented or enabled. v3 does not use v2's `PK`, `WALLET`, `SIG_TYPE`, Polygon RPC, `web3`, or CLOB-client setup.
+
