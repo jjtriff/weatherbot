@@ -55,7 +55,7 @@ class PolymarketUSGateway:
 
     def list_events(self) -> list[Mapping[str, object]]:
         try:
-            response = self._client.events.list()
+            response = self._client.events.list({"limit": 100, "active": True, "closed": False})
             if isinstance(response, Mapping):
                 events = response.get("events", [])
             else:
