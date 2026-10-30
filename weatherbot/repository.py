@@ -108,19 +108,18 @@ class PaperRepository:
 
     def learning_stats(self) -> dict[str, int | Decimal]:
         with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT
-                    COUNT(*) AS settled_trades,
-                    COALESCE(SUM(CASE WHEN settlement = 1 THEN 1 ELSE 0 END), 0) AS positive_outcomes,
-                    COALESCE(SUM(CAST(pnl AS REAL)), 0) AS pnl
-                FROM paper_trades
-                WHERE status = 'settled'
-                """
-            ).fetchone()
-        assert row is not None
+            rows = connection.execute(
+                "SELECT settlement, pnl FROM paper_trades WHERE status = 'settled'"
+            ).fetchall()
+        settled_trades = len(rows)
+        positive_outcomes = sum(1 for row in rows if int(row["settlement"]) == 1)
+        hypothetical_pnl = sum((Decimal(str(row["pnl"])) for row in rows), Decimal(0))
+        positive_outcome_rate = (
+            Decimal(positive_outcomes) / Decimal(settled_trades) if settled_trades else Decimal(0)
+        )
         return {
-            "settled_trades": int(row["settled_trades"]),
-            "positive_outcomes": int(row["positive_outcomes"]),
-            "hypothetical_pnl": Decimal(str(row["pnl"])),
+            "settled_trades": settled_trades,
+            "positive_outcomes": positive_outcomes,
+            "positive_outcome_rate": positive_outcome_rate,
+            "hypothetical_pnl": hypothetical_pnl,
         }

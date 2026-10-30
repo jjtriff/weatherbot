@@ -63,3 +63,4 @@ def test_reconciliation_records_positive_outcomes_and_hypothetical_profit(tmp_pa
     stats = repository.learning_stats()
     assert stats["positive_outcomes"] == 2
     assert stats["hypothetical_pnl"] > Decimal(0)
+    assert stats["positive_outcome_rate"] == Decimal(1)

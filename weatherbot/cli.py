@@ -59,6 +59,7 @@ def main() -> None:
         print(
             f"paper_status settled={stats['settled_trades']} "
             f"positive_outcomes={stats['positive_outcomes']} "
+            f"positive_outcome_rate={stats['positive_outcome_rate']} "
             f"hypothetical_pnl={stats['hypothetical_pnl']}"
         )
 
