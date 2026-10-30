@@ -8,6 +8,7 @@ from typing import Protocol
 
 from weatherbot.discovery import UnsupportedWeatherMarket, parse_temperature_bucket
 from weatherbot.domain import MarketQuote
+from weatherbot.marketplace import MarketplaceError
 from weatherbot.repository import PaperRepository
 
 
@@ -71,7 +72,12 @@ class PaperWeatherBot:
                 except UnsupportedWeatherMarket:
                     continue
                 discovered += 1
-                quote = self._gateway.get_bbo(slug)
+                quote = _quote_from_market_payload(slug, market)
+                if quote is None:
+                    try:
+                        quote = self._gateway.get_bbo(slug)
+                    except MarketplaceError:
+                        continue
                 if quote.best_ask is None:
                     continue
                 shares = (self._stake_per_trade / quote.best_ask).quantize(
@@ -133,3 +139,25 @@ def _is_weather_event(event: Mapping[str, object]) -> bool:
     return category == "weather" or any(
         term in text for term in ("weather", "temperature", "rainfall")
     )
+
+
+def _quote_from_market_payload(
+    market_slug: str, market: Mapping[str, object]
+) -> MarketQuote | None:
+    ask = _quote_value(market.get("bestAskQuote"))
+    if ask is None:
+        return None
+    return MarketQuote(
+        market_slug=market_slug,
+        best_bid=_quote_value(market.get("bestBidQuote")),
+        best_ask=ask,
+        volume=_quote_value(market.get("sharesTraded")) or Decimal(0),
+    )
+
+
+def _quote_value(value: object) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, Mapping):
+        return _quote_value(value.get("value"))
+    return Decimal(str(value))

@@ -43,6 +43,10 @@ def parse_temperature_bucket(question: str) -> TemperatureBucket:
             lower=Decimal(titled_range.group(1)), upper=Decimal(titled_range.group(2))
         )
 
+    titled_exact = re.search(rf"\?\s*{_NUMBER}{_UNIT}$", normalized, re.IGNORECASE)
+    if titled_exact:
+        return TemperatureBucket.exact(Decimal(titled_exact.group(1)))
+
     exact = re.search(rf"be\s+{_NUMBER}{_UNIT}\s+on\b", normalized, re.IGNORECASE)
     if exact:
         return TemperatureBucket.exact(Decimal(exact.group(1)))
