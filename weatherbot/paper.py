@@ -100,7 +100,10 @@ class PaperWeatherBot:
         pnl = Decimal(0)
         for trade in self._repository.open_trades():
             market_slug = str(trade["market_slug"])
-            response = self._gateway.get_settlement(market_slug)
+            try:
+                response = self._gateway.get_settlement(market_slug)
+            except MarketplaceError:
+                continue
             raw_settlement = response.get("settlement")
             if raw_settlement not in {0, 1}:
                 continue

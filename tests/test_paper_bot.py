@@ -123,3 +123,19 @@ def test_paper_scan_skips_temporarily_unavailable_bbo_without_failing(tmp_path) 
 
     assert bot.scan_once().paper_trades == 0
     assert repository.count_open_trades() == 0
+
+
+def test_reconciliation_keeps_open_trade_when_settlement_is_not_available(tmp_path) -> None:
+    repository = PaperRepository(tmp_path / "paper.sqlite3")
+
+    class UnsettledGateway(FakeGateway):
+        def get_settlement(self, market_slug: str) -> dict[str, object]:
+            raise MarketplaceError("settlement not found")
+
+    bot = PaperWeatherBot(
+        gateway=UnsettledGateway(), repository=repository, stake_per_trade=Decimal("1.00")
+    )
+    bot.scan_once()
+
+    assert bot.reconcile_once().settled == 0
+    assert repository.count_open_trades() == 2
