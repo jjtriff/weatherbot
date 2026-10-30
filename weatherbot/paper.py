@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 from typing import Protocol
 
+from weatherbot.discovery import UnsupportedWeatherMarket, parse_temperature_bucket
 from weatherbot.domain import MarketQuote
 from weatherbot.repository import PaperRepository
 
@@ -60,7 +61,12 @@ class PaperWeatherBot:
                 if not isinstance(market, Mapping) or market.get("closed") is True:
                     continue
                 slug = str(market.get("slug") or "").strip()
-                if not slug:
+                question = str(market.get("question") or market.get("title") or "").strip()
+                if not slug or not question:
+                    continue
+                try:
+                    parse_temperature_bucket(question)
+                except UnsupportedWeatherMarket:
                     continue
                 discovered += 1
                 quote = self._gateway.get_bbo(slug)
