@@ -73,7 +73,9 @@ class PolymarketUSGateway:
             market_data = _mapping(payload.get("marketData", {}))
             bid = _decimal_or_none(market_data.get("bestBid"))
             ask = _decimal_or_none(market_data.get("bestAsk"))
-            volume = _decimal_or_none(market_data.get("volume")) or Decimal(0)
+            volume = _decimal_or_none(
+                market_data.get("volume") or market_data.get("sharesTraded")
+            ) or Decimal(0)
             return MarketQuote(market_slug=market_slug, best_bid=bid, best_ask=ask, volume=volume)
         except MarketplaceError:
             raise
@@ -144,4 +146,6 @@ def _mapping(value: object) -> Mapping[str, object]:
 def _decimal_or_none(value: object) -> Decimal | None:
     if value is None or value == "":
         return None
+    if isinstance(value, Mapping):
+        return _decimal_or_none(value.get("value"))
     return Decimal(str(value))

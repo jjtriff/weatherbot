@@ -76,6 +76,27 @@ def test_gateway_uses_sdk_bbo_shape() -> None:
     assert client.markets.bbo_calls == ["paris-14c"]
 
 
+def test_gateway_accepts_sdk_money_quote_objects() -> None:
+    client = FakeClient()
+    client.markets.bbo = lambda slug: {
+        "marketData": {
+            "bestBid": {"value": "0.10", "currency": "USD"},
+            "bestAsk": {"value": "0.12", "currency": "USD"},
+            "sharesTraded": "750",
+        }
+    }
+    gateway = PolymarketUSGateway(client=client, live_enabled=False)
+
+    quote = gateway.get_bbo("paris-14c")
+
+    assert quote == MarketQuote(
+        market_slug="paris-14c",
+        best_bid=Decimal("0.10"),
+        best_ask=Decimal("0.12"),
+        volume=Decimal(750),
+    )
+
+
 def test_gateway_discovers_active_weather_events_through_sdk_search() -> None:
     client = FakeClient()
     gateway = PolymarketUSGateway(client=client, live_enabled=False)
