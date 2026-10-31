@@ -2,17 +2,24 @@ from __future__ import annotations
 
 import argparse
 import os
-from decimal import Decimal
+from pathlib import Path
+from typing import cast
 
+import requests
 from dotenv import load_dotenv
 
-from weatherbot.config import ConfigurationError, load_settings
+from weatherbot.config import (
+    ConfigurationError,
+    load_paper_strategy_settings,
+    load_settings,
+)
 from weatherbot.marketplace import PolymarketUSGateway
 from weatherbot.paper import PaperWeatherBot
 from weatherbot.repository import PaperRepository
+from weatherbot.weather import ForecastSelector, HttpSession, OpenMeteoProvider
 
 
-def _paper_bot(database_override: str | None, stake: Decimal) -> PaperWeatherBot:
+def _paper_bot(database_override: str | None) -> PaperWeatherBot:
     load_dotenv()
     settings = load_settings(os.environ)
     if settings.mode != "paper":
@@ -22,26 +29,27 @@ def _paper_bot(database_override: str | None, stake: Decimal) -> PaperWeatherBot
         if database_override is None
         else settings.database_path.with_name(database_override)
     )
+    strategy_path = Path(os.environ.get("WEATHERBOT_STRATEGY_CONFIG", "config.json"))
     return PaperWeatherBot(
         gateway=PolymarketUSGateway.public(),
         repository=PaperRepository(database_path),
-        stake_per_trade=stake,
+        strategy_settings=load_paper_strategy_settings(strategy_path),
+        forecast_selector=ForecastSelector(
+            providers=[OpenMeteoProvider(session=cast(HttpSession, requests.Session()))]
+        ),
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="weatherbot")
     subcommands = parser.add_subparsers(dest="command", required=True)
-    scan = subcommands.add_parser("paper-scan", help="run one paper-only weather scan")
-    scan.add_argument("--stake", type=Decimal, default=Decimal("1.00"))
+    subcommands.add_parser("paper-scan", help="run one paper-only weather scan")
     run = subcommands.add_parser("paper-run", help="run paper scans continuously")
     run.add_argument("--interval", type=int, default=3600)
-    run.add_argument("--stake", type=Decimal, default=Decimal("1.00"))
-    status = subcommands.add_parser("paper-status", help="show paper learning results")
-    status.add_argument("--stake", type=Decimal, default=Decimal("1.00"))
+    subcommands.add_parser("paper-status", help="show paper learning results")
 
     arguments = parser.parse_args()
-    bot = _paper_bot(None, arguments.stake)
+    bot = _paper_bot(None)
     if arguments.command == "paper-scan":
         reconciliation = bot.reconcile_once()
         summary = bot.scan_once()

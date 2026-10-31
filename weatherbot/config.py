@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -40,6 +41,19 @@ class Settings:
     visual_crossing_key: str | None
 
 
+@dataclass(frozen=True)
+class PaperStrategySettings:
+    starting_balance: Decimal
+    max_bet: Decimal
+    min_ev: Decimal
+    max_price: Decimal
+    min_volume: Decimal
+    min_hours: Decimal
+    max_hours: Decimal
+    max_spread: Decimal
+    kelly_fraction: Decimal
+
+
 def _decimal(environ: Mapping[str, str], key: str, default: Decimal) -> Decimal:
     value = environ.get(key)
     if value is None or not value.strip():
@@ -48,6 +62,39 @@ def _decimal(environ: Mapping[str, str], key: str, default: Decimal) -> Decimal:
         return Decimal(value)
     except Exception as exc:  # Decimal's exception type is an implementation detail here.
         raise ConfigurationError(f"{key} must be a decimal number") from exc
+
+
+def _json_decimal(config: Mapping[str, object], key: str, default: Decimal) -> Decimal:
+    value = config.get(key, default)
+    try:
+        return Decimal(str(value))
+    except Exception as exc:
+        raise ConfigurationError(f"config.json {key} must be a decimal number") from exc
+
+
+def load_paper_strategy_settings(path: Path) -> PaperStrategySettings:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigurationError(f"cannot read paper strategy config: {path}") from exc
+    if not isinstance(payload, Mapping):
+        raise ConfigurationError("paper strategy config must be a JSON object")
+    settings = PaperStrategySettings(
+        starting_balance=_json_decimal(payload, "balance", DEFAULT_STARTING_BALANCE),
+        max_bet=_json_decimal(payload, "max_bet", DEFAULT_MAX_BET),
+        min_ev=_json_decimal(payload, "min_ev", DEFAULT_MIN_EV),
+        max_price=_json_decimal(payload, "max_price", DEFAULT_MAX_PRICE),
+        min_volume=_json_decimal(payload, "min_volume", DEFAULT_MIN_VOLUME),
+        min_hours=_json_decimal(payload, "min_hours", Decimal(0)),
+        max_hours=_json_decimal(payload, "max_hours", Decimal(999999)),
+        max_spread=_json_decimal(payload, "max_slippage", DEFAULT_MAX_SPREAD),
+        kelly_fraction=_json_decimal(payload, "kelly_fraction", DEFAULT_KELLY_FRACTION),
+    )
+    if settings.starting_balance <= 0 or settings.max_bet <= 0:
+        raise ConfigurationError("paper strategy balance and max_bet must be positive")
+    if settings.min_hours < 0 or settings.max_hours < settings.min_hours:
+        raise ConfigurationError("paper strategy hours range is invalid")
+    return settings
 
 
 def load_settings(environ: Mapping[str, str]) -> Settings:

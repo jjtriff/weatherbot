@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Protocol
 
+from weatherbot.config import PaperStrategySettings
 from weatherbot.discovery import UnsupportedWeatherMarket, parse_temperature_bucket
-from weatherbot.domain import MarketQuote
+from weatherbot.domain import MarketQuote, TemperatureBucket
 from weatherbot.marketplace import MarketplaceError
+from weatherbot.probability import bucket_probability
 from weatherbot.repository import PaperRepository
+from weatherbot.strategy import RiskPolicy, evaluate_candidate
+from weatherbot.weather import CITIES, City, ForecastSelection
 
 
 class PaperMarketplaceGateway(Protocol):
@@ -18,6 +24,10 @@ class PaperMarketplaceGateway(Protocol):
     def get_bbo(self, market_slug: str) -> MarketQuote: ...
 
     def get_settlement(self, market_slug: str) -> Mapping[str, object]: ...
+
+
+class PaperForecastSelector(Protocol):
+    def select(self, city: City, target_date: date) -> ForecastSelection | None: ...
 
 
 @dataclass(frozen=True)
@@ -34,64 +44,102 @@ class ReconcileSummary:
 
 
 class PaperWeatherBot:
-    """Paper-only weather scanner that deliberately bypasses v3 risk filters."""
+    """Paper execution of the same selective strategy used for eventual live evaluation."""
 
     def __init__(
         self,
         *,
         gateway: PaperMarketplaceGateway,
         repository: PaperRepository,
-        stake_per_trade: Decimal,
+        strategy_settings: PaperStrategySettings,
+        forecast_selector: PaperForecastSelector,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
-        if stake_per_trade <= 0:
-            raise ValueError("stake_per_trade must be positive")
         self._gateway = gateway
         self._repository = repository
-        self._stake_per_trade = stake_per_trade
+        self._strategy_settings = strategy_settings
+        self._forecast_selector = forecast_selector
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._risk_policy = RiskPolicy(
+            min_ev=strategy_settings.min_ev,
+            max_spread=strategy_settings.max_spread,
+            max_bet=strategy_settings.max_bet,
+            max_price=strategy_settings.max_price,
+            min_volume=strategy_settings.min_volume,
+            kelly_fraction=strategy_settings.kelly_fraction,
+            max_total_exposure=strategy_settings.starting_balance,
+        )
 
     def scan_once(self) -> ScanSummary:
         discovered = 0
         paper_trades = 0
+        current_exposure = sum(
+            (Decimal(str(trade["cost"])) for trade in self._repository.open_trades()), Decimal(0)
+        )
+        available_cash = max(
+            Decimal(0), self._strategy_settings.starting_balance - current_exposure
+        )
+        forecast_cache: dict[tuple[str, date], ForecastSelection | None] = {}
+        now = self._now()
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+
         for event in self._gateway.list_events():
             if not _is_weather_event(event):
                 continue
+            city = _city_from_event(event)
             markets = event.get("markets", [])
-            if not isinstance(markets, list):
+            if city is None or not isinstance(markets, list):
                 continue
             for market in markets:
                 if not isinstance(market, Mapping) or market.get("closed") is True:
                     continue
-                slug = str(market.get("slug") or "").strip()
-                question = str(market.get("question") or "").strip()
-                title = str(market.get("title") or "").strip()
-                contract_text = " ".join(part for part in (question, title) if part)
-                if not slug or not contract_text:
+                context = _market_context(city, market)
+                if context is None:
                     continue
-                try:
-                    parse_temperature_bucket(contract_text)
-                except UnsupportedWeatherMarket:
-                    continue
+                slug, target_date, bucket, settlement_time = context
                 discovered += 1
+                hours_to_settlement = Decimal(
+                    str((settlement_time - now.astimezone(timezone.utc)).total_seconds() / 3600)
+                )
+                if not self._is_within_trade_window(hours_to_settlement):
+                    continue
+                cache_key = (city.slug, target_date)
+                if cache_key not in forecast_cache:
+                    forecast_cache[cache_key] = self._forecast_selector.select(city, target_date)
+                selection = forecast_cache[cache_key]
+                if selection is None:
+                    continue
                 quote = _quote_from_market_payload(slug, market)
                 if quote is None:
                     try:
                         quote = self._gateway.get_bbo(slug)
                     except MarketplaceError:
                         continue
-                if quote.best_ask is None:
-                    continue
-                shares = (self._stake_per_trade / quote.best_ask).quantize(
-                    Decimal("0.0001"), rounding=ROUND_DOWN
+                sigma = Decimal("2.0") if city.temperature_unit == "fahrenheit" else Decimal("1.2")
+                probability = bucket_probability(selection.forecast.value, bucket, sigma)
+                decision = evaluate_candidate(
+                    market_slug=slug,
+                    probability=probability,
+                    quote=quote,
+                    available_cash=available_cash,
+                    current_exposure=current_exposure,
+                    policy=self._risk_policy,
                 )
+                if not decision.accepted:
+                    continue
+                assert decision.candidate is not None
                 created = self._repository.create_trade(
                     market_slug=slug,
                     market_title=str(market.get("title") or market.get("question") or slug),
-                    entry_price=quote.best_ask,
-                    cost=self._stake_per_trade,
-                    shares=shares,
+                    entry_price=decision.candidate.entry_price,
+                    cost=decision.candidate.cost,
+                    shares=decision.candidate.shares,
                 )
                 if created:
                     paper_trades += 1
+                    current_exposure += decision.candidate.cost
+                    available_cash -= decision.candidate.cost
         return ScanSummary(discovered=discovered, paper_trades=paper_trades)
 
     def reconcile_once(self) -> ReconcileSummary:
@@ -133,6 +181,13 @@ class PaperWeatherBot:
             )
             time.sleep(interval_seconds)
 
+    def _is_within_trade_window(self, hours_to_settlement: Decimal) -> bool:
+        return (
+            self._strategy_settings.min_hours
+            <= hours_to_settlement
+            <= self._strategy_settings.max_hours
+        )
+
 
 def _is_weather_event(event: Mapping[str, object]) -> bool:
     category = str(event.get("category") or "").lower()
@@ -142,6 +197,33 @@ def _is_weather_event(event: Mapping[str, object]) -> bool:
     return category == "weather" or any(
         term in text for term in ("weather", "temperature", "rainfall")
     )
+
+
+def _city_from_event(event: Mapping[str, object]) -> City | None:
+    title = str(event.get("title") or "").lower()
+    for city in CITIES.values():
+        if f"in {city.name.lower()}" in title:
+            return city
+    return None
+
+
+def _market_context(
+    city: City, market: Mapping[str, object]
+) -> tuple[str, date, TemperatureBucket, datetime] | None:
+    slug = str(market.get("slug") or "").strip()
+    question = str(market.get("question") or "").strip()
+    title = str(market.get("title") or "").strip()
+    end_date = str(market.get("endDate") or "").strip()
+    match = re.search(r"-(\d{4}-\d{2}-\d{2})-", slug)
+    if not slug or not match or not end_date:
+        return None
+    try:
+        bucket = parse_temperature_bucket(" ".join(part for part in (question, title) if part))
+        target_date = date.fromisoformat(match.group(1))
+        settlement_time = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+    except (UnsupportedWeatherMarket, ValueError):
+        return None
+    return slug, target_date, bucket, settlement_time
 
 
 def _quote_from_market_payload(
