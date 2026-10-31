@@ -37,6 +37,7 @@ def _paper_bot(database_override: str | None) -> PaperWeatherBot:
         forecast_selector=ForecastSelector(
             providers=[OpenMeteoProvider(session=cast(HttpSession, requests.Session()))]
         ),
+        heartbeat_path=database_path.with_name("paper-run-heartbeat.json"),
     )
 
 

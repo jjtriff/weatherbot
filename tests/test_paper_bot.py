@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
 
 from weatherbot.config import PaperStrategySettings
 from weatherbot.domain import MarketQuote
 from weatherbot.marketplace import MarketplaceError
-from weatherbot.paper import PaperWeatherBot
+from weatherbot.paper import PaperWeatherBot, ReconcileSummary, ScanSummary, write_heartbeat
 from weatherbot.repository import PaperRepository
 from weatherbot.weather import Forecast, ForecastSelection
 
@@ -185,3 +186,26 @@ def test_reconciliation_keeps_open_trade_when_settlement_is_not_available(tmp_pa
 
     assert bot.reconcile_once().settled == 0
     assert repository.count_open_trades() == 1
+
+
+def test_runner_heartbeat_records_cycle_status(tmp_path) -> None:
+    heartbeat_path = tmp_path / "paper-run-heartbeat.json"
+
+    write_heartbeat(
+        heartbeat_path,
+        now=datetime(2026, 10, 31, 19, tzinfo=timezone.utc),
+        scan=ScanSummary(discovered=5, paper_trades=1, rejections={"ev_too_low": 4}),
+        reconciliation=ReconcileSummary(
+            settled=2, positive_outcomes=1, hypothetical_pnl=Decimal("3.25")
+        ),
+    )
+
+    assert json.loads(heartbeat_path.read_text()) == {
+        "discovered": 5,
+        "hypothetical_pnl": "3.25",
+        "new_paper_trades": 1,
+        "positive_outcomes": 1,
+        "rejections": {"ev_too_low": 4},
+        "settled": 2,
+        "updated_at": "2026-10-31T19:00:00+00:00",
+    }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections import Counter
@@ -7,6 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Protocol
 
 from weatherbot.config import PaperStrategySettings
@@ -56,12 +58,14 @@ class PaperWeatherBot:
         strategy_settings: PaperStrategySettings,
         forecast_selector: PaperForecastSelector,
         now: Callable[[], datetime] | None = None,
+        heartbeat_path: Path | None = None,
     ) -> None:
         self._gateway = gateway
         self._repository = repository
         self._strategy_settings = strategy_settings
         self._forecast_selector = forecast_selector
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._heartbeat_path = heartbeat_path
         self._risk_policy = RiskPolicy(
             min_ev=strategy_settings.min_ev,
             max_spread=strategy_settings.max_spread,
@@ -193,6 +197,13 @@ class PaperWeatherBot:
         while True:
             reconciliation = self.reconcile_once()
             scan = self.scan_once()
+            if self._heartbeat_path is not None:
+                write_heartbeat(
+                    self._heartbeat_path,
+                    now=self._now(),
+                    scan=scan,
+                    reconciliation=reconciliation,
+                )
             print(
                 "paper_cycle "
                 f"discovered={scan.discovered} new_paper_trades={scan.paper_trades} "
@@ -274,3 +285,25 @@ def format_rejections(rejections: Mapping[str, int]) -> str:
     if not rejections:
         return "none"
     return ",".join(f"{reason}:{count}" for reason, count in sorted(rejections.items()))
+
+
+def write_heartbeat(
+    path: Path,
+    *,
+    now: datetime,
+    scan: ScanSummary,
+    reconciliation: ReconcileSummary,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": now.isoformat(),
+        "discovered": scan.discovered,
+        "new_paper_trades": scan.paper_trades,
+        "rejections": dict(scan.rejections),
+        "settled": reconciliation.settled,
+        "positive_outcomes": reconciliation.positive_outcomes,
+        "hypothetical_pnl": str(reconciliation.hypothetical_pnl),
+    }
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(json.dumps(payload, sort_keys=True))
+    temporary_path.replace(path)
