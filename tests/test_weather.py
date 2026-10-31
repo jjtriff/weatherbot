@@ -3,7 +3,13 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from weatherbot.weather import CITIES, OpenMeteoProvider, local_market_date
+from weatherbot.weather import (
+    CITIES,
+    Forecast,
+    ForecastSelector,
+    OpenMeteoProvider,
+    local_market_date,
+)
 
 
 class FakeResponse:
@@ -74,3 +80,28 @@ def test_local_market_date_preserves_market_timezone_across_utc_boundary() -> No
     now = datetime(2026, 11, 1, 3, 30, tzinfo=timezone.utc)
 
     assert local_market_date(now, CITIES["los-angeles"].timezone) == date(2026, 10, 31)
+
+
+def test_forecast_selector_records_selected_source_and_disagreement() -> None:
+    class StaticProvider:
+        def __init__(self, source: str, value: str) -> None:
+            self.source = source
+            self.value = Decimal(value)
+
+        def daily_high(self, city, target_date):
+            return Forecast(
+                city_slug=city.slug,
+                station=city.station,
+                target_date=target_date,
+                value=self.value,
+                source=self.source,
+            )
+
+    selection = ForecastSelector(
+        providers=[StaticProvider("primary", "70.0"), StaticProvider("backup", "72.5")]
+    ).select(CITIES["chicago"], date(2026, 11, 1))
+
+    assert selection is not None
+    assert selection.forecast.source == "primary"
+    assert selection.reason == "first_available_provider"
+    assert selection.disagreement == Decimal("2.5")

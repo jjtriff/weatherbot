@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -26,6 +26,13 @@ class Forecast:
     target_date: date
     value: Decimal
     source: str
+
+
+@dataclass(frozen=True)
+class ForecastSelection:
+    forecast: Forecast
+    reason: str
+    disagreement: Decimal | None
 
 
 CITIES: Mapping[str, City] = {
@@ -141,6 +148,29 @@ class OpenMeteoProvider:
                 source=self.source,
             )
         return None
+
+
+class ForecastSelector:
+    """Select the first available configured forecast and retain source spread."""
+
+    def __init__(self, *, providers: Sequence[WeatherProvider]) -> None:
+        self._providers = tuple(providers)
+
+    def select(self, city: City, target_date: date) -> ForecastSelection | None:
+        forecasts = [
+            forecast
+            for provider in self._providers
+            if (forecast := provider.daily_high(city, target_date)) is not None
+        ]
+        if not forecasts:
+            return None
+        values = [forecast.value for forecast in forecasts]
+        disagreement = max(values) - min(values) if len(values) > 1 else None
+        return ForecastSelection(
+            forecast=forecasts[0],
+            reason="first_available_provider",
+            disagreement=disagreement,
+        )
 
 
 def local_market_date(now: datetime, timezone_name: str) -> date:
