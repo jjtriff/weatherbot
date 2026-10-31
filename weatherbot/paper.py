@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -34,6 +35,7 @@ class PaperForecastSelector(Protocol):
 class ScanSummary:
     discovered: int
     paper_trades: int
+    rejections: Mapping[str, int]
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,7 @@ class PaperWeatherBot:
     def scan_once(self) -> ScanSummary:
         discovered = 0
         paper_trades = 0
+        rejections: Counter[str] = Counter()
         current_exposure = sum(
             (Decimal(str(trade["cost"])) for trade in self._repository.open_trades()), Decimal(0)
         )
@@ -89,13 +92,17 @@ class PaperWeatherBot:
                 continue
             city = _city_from_event(event)
             markets = event.get("markets", [])
-            if city is None or not isinstance(markets, list):
+            if not isinstance(markets, list):
+                continue
+            if city is None:
+                rejections["unsupported_city"] += len(markets)
                 continue
             for market in markets:
                 if not isinstance(market, Mapping) or market.get("closed") is True:
                     continue
                 context = _market_context(city, market)
                 if context is None:
+                    rejections["unsupported_contract"] += 1
                     continue
                 slug, target_date, bucket, settlement_time = context
                 discovered += 1
@@ -103,18 +110,25 @@ class PaperWeatherBot:
                     str((settlement_time - now.astimezone(timezone.utc)).total_seconds() / 3600)
                 )
                 if not self._is_within_trade_window(hours_to_settlement):
+                    rejections[
+                        "settlement_too_soon"
+                        if hours_to_settlement < self._strategy_settings.min_hours
+                        else "settlement_too_far"
+                    ] += 1
                     continue
                 cache_key = (city.slug, target_date)
                 if cache_key not in forecast_cache:
                     forecast_cache[cache_key] = self._forecast_selector.select(city, target_date)
                 selection = forecast_cache[cache_key]
                 if selection is None:
+                    rejections["forecast_unavailable"] += 1
                     continue
                 quote = _quote_from_market_payload(slug, market)
                 if quote is None:
                     try:
                         quote = self._gateway.get_bbo(slug)
                     except MarketplaceError:
+                        rejections["quote_unavailable"] += 1
                         continue
                 sigma = Decimal("2.0") if city.temperature_unit == "fahrenheit" else Decimal("1.2")
                 probability = bucket_probability(selection.forecast.value, bucket, sigma)
@@ -127,6 +141,7 @@ class PaperWeatherBot:
                     policy=self._risk_policy,
                 )
                 if not decision.accepted:
+                    rejections[decision.reason] += 1
                     continue
                 assert decision.candidate is not None
                 created = self._repository.create_trade(
@@ -140,7 +155,13 @@ class PaperWeatherBot:
                     paper_trades += 1
                     current_exposure += decision.candidate.cost
                     available_cash -= decision.candidate.cost
-        return ScanSummary(discovered=discovered, paper_trades=paper_trades)
+                else:
+                    rejections["already_open"] += 1
+        return ScanSummary(
+            discovered=discovered,
+            paper_trades=paper_trades,
+            rejections=dict(sorted(rejections.items())),
+        )
 
     def reconcile_once(self) -> ReconcileSummary:
         settled = 0
@@ -175,6 +196,7 @@ class PaperWeatherBot:
             print(
                 "paper_cycle "
                 f"discovered={scan.discovered} new_paper_trades={scan.paper_trades} "
+                f"rejections={format_rejections(scan.rejections)} "
                 f"settled={reconciliation.settled} positive_outcomes={reconciliation.positive_outcomes} "
                 f"hypothetical_pnl={reconciliation.hypothetical_pnl}",
                 flush=True,
@@ -246,3 +268,9 @@ def _quote_value(value: object) -> Decimal | None:
     if isinstance(value, Mapping):
         return _quote_value(value.get("value"))
     return Decimal(str(value))
+
+
+def format_rejections(rejections: Mapping[str, int]) -> str:
+    if not rejections:
+        return "none"
+    return ",".join(f"{reason}:{count}" for reason, count in sorted(rejections.items()))

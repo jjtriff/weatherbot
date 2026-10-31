@@ -14,7 +14,7 @@ from weatherbot.config import (
     load_settings,
 )
 from weatherbot.marketplace import PolymarketUSGateway
-from weatherbot.paper import PaperWeatherBot
+from weatherbot.paper import PaperWeatherBot, format_rejections
 from weatherbot.repository import PaperRepository
 from weatherbot.weather import ForecastSelector, HttpSession, OpenMeteoProvider
 
@@ -55,6 +55,7 @@ def main() -> None:
         summary = bot.scan_once()
         print(
             f"paper_scan discovered={summary.discovered} new_paper_trades={summary.paper_trades} "
+            f"rejections={format_rejections(summary.rejections)} "
             f"settled={reconciliation.settled} positive_outcomes={reconciliation.positive_outcomes} "
             f"hypothetical_pnl={reconciliation.hypothetical_pnl}"
         )

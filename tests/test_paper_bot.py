@@ -104,6 +104,7 @@ def test_paper_scan_only_trades_positive_ev_temperature_bucket(tmp_path) -> None
 
     assert summary.discovered == 2
     assert summary.paper_trades == 1
+    assert summary.rejections == {"ev_too_low": 1, "unsupported_contract": 1}
     assert repository.count_open_trades() == 1
     trade = repository.get_trade("tc-temp-mdwhigh-2026-10-31-gte64lt65f")
     assert trade["entry_price"] == "0.12"
@@ -118,6 +119,7 @@ def test_paper_scan_is_idempotent_and_respects_exposure(tmp_path) -> None:
     summary = bot.scan_once()
 
     assert summary.paper_trades == 0
+    assert summary.rejections["already_open"] == 1
     assert repository.count_open_trades() == 1
 
 
@@ -149,7 +151,10 @@ def test_paper_scan_skips_temporarily_unavailable_bbo_without_failing(tmp_path) 
         def get_bbo(self, market_slug: str) -> MarketQuote:
             raise MarketplaceError("rate limited")
 
-    assert paper_bot(repository, UnavailableQuoteGateway()).scan_once().paper_trades == 0
+    summary = paper_bot(repository, UnavailableQuoteGateway()).scan_once()
+
+    assert summary.paper_trades == 0
+    assert summary.rejections["quote_unavailable"] == 2
     assert repository.count_open_trades() == 0
 
 
