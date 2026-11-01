@@ -39,6 +39,7 @@ class Settings:
     max_spread: Decimal
     kelly_fraction: Decimal
     visual_crossing_key: str | None
+    debug_analysis: bool
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,18 @@ def _decimal(environ: Mapping[str, str], key: str, default: Decimal) -> Decimal:
         return Decimal(value)
     except Exception as exc:  # Decimal's exception type is an implementation detail here.
         raise ConfigurationError(f"{key} must be a decimal number") from exc
+
+
+def _bool(environ: Mapping[str, str], key: str, default: bool = False) -> bool:
+    value = environ.get(key)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{key} must be a boolean")
 
 
 def _json_decimal(config: Mapping[str, object], key: str, default: Decimal) -> Decimal:
@@ -127,4 +140,5 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
         max_spread=_decimal(environ, "WEATHERBOT_MAX_SPREAD", DEFAULT_MAX_SPREAD),
         kelly_fraction=_decimal(environ, "WEATHERBOT_KELLY_FRACTION", DEFAULT_KELLY_FRACTION),
         visual_crossing_key=environ.get("VISUAL_CROSSING_KEY") or None,
+        debug_analysis=_bool(environ, "WEATHERBOT_DEBUG_ANALYSIS"),
     )

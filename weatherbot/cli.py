@@ -38,6 +38,7 @@ def _paper_bot(database_override: str | None) -> PaperWeatherBot:
             providers=[OpenMeteoProvider(session=cast(HttpSession, requests.Session()))]
         ),
         heartbeat_path=database_path.with_name("paper-run-heartbeat.json"),
+        debug_analysis=settings.debug_analysis,
     )
 
 
@@ -48,6 +49,10 @@ def main() -> None:
     run = subcommands.add_parser("paper-run", help="run paper scans continuously")
     run.add_argument("--interval", type=int, default=3600)
     subcommands.add_parser("paper-status", help="show paper learning results")
+    debug_report = subcommands.add_parser(
+        "paper-debug-report", help="show the latest per-market debug analysis scan"
+    )
+    debug_report.add_argument("--limit", type=int, default=200)
 
     arguments = parser.parse_args()
     bot = _paper_bot(None)
@@ -72,6 +77,30 @@ def main() -> None:
             f"positive_outcome_rate={stats['positive_outcome_rate']} "
             f"hypothetical_pnl={stats['hypothetical_pnl']}"
         )
+    elif arguments.command == "paper-debug-report":
+        analyses = bot._repository.latest_market_analyses()[: arguments.limit]
+        if not analyses:
+            print("paper_debug_report no_debug_analysis_rows")
+            return
+        scan_id = analyses[0]["scan_id"]
+        scanned_at = analyses[0]["scanned_at"]
+        print(f"paper_debug_report scan_id={scan_id} scanned_at={scanned_at} rows={len(analyses)}")
+        for record in analyses:
+            print(
+                " | ".join(
+                    [
+                        str(record["event_title"]),
+                        str(record["market_title"]),
+                        f"reason={record['decision_reason']}",
+                        f"forecast={record['forecast_value']}",
+                        f"probability={record['probability']}",
+                        f"bid={record['best_bid']}",
+                        f"ask={record['best_ask']}",
+                        f"volume={record['volume']}",
+                        f"quote_source={record['quote_source']}",
+                    ]
+                )
+            )
 
 
 if __name__ == "__main__":

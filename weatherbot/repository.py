@@ -5,6 +5,8 @@ from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 
+from weatherbot.domain import MarketQuote
+
 
 class PaperRepository:
     """SQLite-backed, idempotent paper-trading and learning ledger."""
@@ -36,6 +38,33 @@ class PaperRepository:
                     settled_at TEXT
                 )
                 """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS market_analyses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scan_id TEXT NOT NULL,
+                    scanned_at TEXT NOT NULL,
+                    event_title TEXT NOT NULL,
+                    market_slug TEXT NOT NULL,
+                    market_title TEXT NOT NULL,
+                    city_slug TEXT,
+                    target_date TEXT,
+                    settlement_time TEXT,
+                    hours_to_settlement TEXT,
+                    forecast_value TEXT,
+                    forecast_source TEXT,
+                    probability TEXT,
+                    best_bid TEXT,
+                    best_ask TEXT,
+                    volume TEXT,
+                    quote_source TEXT NOT NULL,
+                    decision_reason TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS market_analyses_scan_id ON market_analyses(scan_id, id)"
             )
 
     def create_trade(
@@ -123,3 +152,65 @@ class PaperRepository:
             "positive_outcome_rate": positive_outcome_rate,
             "hypothetical_pnl": hypothetical_pnl,
         }
+
+    def record_market_analysis(
+        self,
+        *,
+        scan_id: str,
+        scanned_at: str,
+        event_title: str,
+        market_slug: str,
+        market_title: str,
+        city_slug: str | None,
+        target_date: str | None,
+        settlement_time: str | None,
+        hours_to_settlement: Decimal | None,
+        forecast_value: Decimal | None,
+        forecast_source: str | None,
+        probability: Decimal | None,
+        quote: MarketQuote | None,
+        quote_source: str,
+        decision_reason: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO market_analyses (
+                    scan_id, scanned_at, event_title, market_slug, market_title,
+                    city_slug, target_date, settlement_time, hours_to_settlement,
+                    forecast_value, forecast_source, probability, best_bid, best_ask,
+                    volume, quote_source, decision_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scan_id,
+                    scanned_at,
+                    event_title,
+                    market_slug,
+                    market_title,
+                    city_slug,
+                    target_date,
+                    settlement_time,
+                    str(hours_to_settlement) if hours_to_settlement is not None else None,
+                    str(forecast_value) if forecast_value is not None else None,
+                    forecast_source,
+                    str(probability) if probability is not None else None,
+                    str(quote.best_bid) if quote and quote.best_bid is not None else None,
+                    str(quote.best_ask) if quote and quote.best_ask is not None else None,
+                    str(quote.volume) if quote else None,
+                    quote_source,
+                    decision_reason,
+                ),
+            )
+
+    def latest_market_analyses(self) -> list[Mapping[str, object]]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT scan_id FROM market_analyses ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return []
+            rows = connection.execute(
+                "SELECT * FROM market_analyses WHERE scan_id = ? ORDER BY id", (row["scan_id"],)
+            ).fetchall()
+        return [dict(row) for row in rows]

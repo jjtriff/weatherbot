@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -59,6 +60,7 @@ class PaperWeatherBot:
         forecast_selector: PaperForecastSelector,
         now: Callable[[], datetime] | None = None,
         heartbeat_path: Path | None = None,
+        debug_analysis: bool = False,
     ) -> None:
         self._gateway = gateway
         self._repository = repository
@@ -66,6 +68,7 @@ class PaperWeatherBot:
         self._forecast_selector = forecast_selector
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._heartbeat_path = heartbeat_path
+        self._debug_analysis = debug_analysis
         self._risk_policy = RiskPolicy(
             min_ev=strategy_settings.min_ev,
             max_spread=strategy_settings.max_spread,
@@ -90,6 +93,8 @@ class PaperWeatherBot:
         now = self._now()
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
+        scan_id = uuid.uuid4().hex
+        scanned_at = now.isoformat()
 
         for event in self._gateway.list_events():
             if not _is_weather_event(event):
@@ -100,6 +105,15 @@ class PaperWeatherBot:
                 continue
             if city is None:
                 rejections["unsupported_city"] += len(markets)
+                for market in markets:
+                    if isinstance(market, Mapping):
+                        self._record_analysis(
+                            scan_id=scan_id,
+                            scanned_at=scanned_at,
+                            event=event,
+                            market=market,
+                            decision_reason="unsupported_city",
+                        )
                 continue
             for market in markets:
                 if not isinstance(market, Mapping) or market.get("closed") is True:
@@ -107,6 +121,14 @@ class PaperWeatherBot:
                 context = _market_context(city, market)
                 if context is None:
                     rejections["unsupported_contract"] += 1
+                    self._record_analysis(
+                        scan_id=scan_id,
+                        scanned_at=scanned_at,
+                        event=event,
+                        market=market,
+                        city=city,
+                        decision_reason="unsupported_contract",
+                    )
                     continue
                 slug, target_date, bucket, settlement_time = context
                 discovered += 1
@@ -114,11 +136,23 @@ class PaperWeatherBot:
                     str((settlement_time - now.astimezone(timezone.utc)).total_seconds() / 3600)
                 )
                 if not self._is_within_trade_window(hours_to_settlement):
-                    rejections[
+                    reason = (
                         "settlement_too_soon"
                         if hours_to_settlement < self._strategy_settings.min_hours
                         else "settlement_too_far"
-                    ] += 1
+                    )
+                    rejections[reason] += 1
+                    self._record_analysis(
+                        scan_id=scan_id,
+                        scanned_at=scanned_at,
+                        event=event,
+                        market=market,
+                        city=city,
+                        target_date=target_date,
+                        settlement_time=settlement_time,
+                        hours_to_settlement=hours_to_settlement,
+                        decision_reason=reason,
+                    )
                     continue
                 cache_key = (city.slug, target_date)
                 if cache_key not in forecast_cache:
@@ -126,13 +160,38 @@ class PaperWeatherBot:
                 selection = forecast_cache[cache_key]
                 if selection is None:
                     rejections["forecast_unavailable"] += 1
+                    self._record_analysis(
+                        scan_id=scan_id,
+                        scanned_at=scanned_at,
+                        event=event,
+                        market=market,
+                        city=city,
+                        target_date=target_date,
+                        settlement_time=settlement_time,
+                        hours_to_settlement=hours_to_settlement,
+                        decision_reason="forecast_unavailable",
+                    )
                     continue
                 quote = _quote_from_market_payload(slug, market)
+                quote_source = "search" if quote is not None else "bbo"
                 if quote is None:
                     try:
                         quote = self._gateway.get_bbo(slug)
                     except MarketplaceError:
                         rejections["quote_unavailable"] += 1
+                        self._record_analysis(
+                            scan_id=scan_id,
+                            scanned_at=scanned_at,
+                            event=event,
+                            market=market,
+                            city=city,
+                            target_date=target_date,
+                            settlement_time=settlement_time,
+                            hours_to_settlement=hours_to_settlement,
+                            selection=selection,
+                            quote_source="unavailable",
+                            decision_reason="quote_unavailable",
+                        )
                         continue
                 sigma = Decimal("2.0") if city.temperature_unit == "fahrenheit" else Decimal("1.2")
                 probability = bucket_probability(selection.forecast.value, bucket, sigma)
@@ -146,6 +205,21 @@ class PaperWeatherBot:
                 )
                 if not decision.accepted:
                     rejections[decision.reason] += 1
+                    self._record_analysis(
+                        scan_id=scan_id,
+                        scanned_at=scanned_at,
+                        event=event,
+                        market=market,
+                        city=city,
+                        target_date=target_date,
+                        settlement_time=settlement_time,
+                        hours_to_settlement=hours_to_settlement,
+                        selection=selection,
+                        probability=probability,
+                        quote=quote,
+                        quote_source=quote_source,
+                        decision_reason=decision.reason,
+                    )
                     continue
                 assert decision.candidate is not None
                 created = self._repository.create_trade(
@@ -159,8 +233,25 @@ class PaperWeatherBot:
                     paper_trades += 1
                     current_exposure += decision.candidate.cost
                     available_cash -= decision.candidate.cost
+                    reason = "accepted"
                 else:
                     rejections["already_open"] += 1
+                    reason = "already_open"
+                self._record_analysis(
+                    scan_id=scan_id,
+                    scanned_at=scanned_at,
+                    event=event,
+                    market=market,
+                    city=city,
+                    target_date=target_date,
+                    settlement_time=settlement_time,
+                    hours_to_settlement=hours_to_settlement,
+                    selection=selection,
+                    probability=probability,
+                    quote=quote,
+                    quote_source=quote_source,
+                    decision_reason=reason,
+                )
         return ScanSummary(
             discovered=discovered,
             paper_trades=paper_trades,
@@ -213,6 +304,43 @@ class PaperWeatherBot:
                 flush=True,
             )
             time.sleep(interval_seconds)
+
+    def _record_analysis(
+        self,
+        *,
+        scan_id: str,
+        scanned_at: str,
+        event: Mapping[str, object],
+        market: Mapping[str, object],
+        decision_reason: str,
+        city: City | None = None,
+        target_date: date | None = None,
+        settlement_time: datetime | None = None,
+        hours_to_settlement: Decimal | None = None,
+        selection: ForecastSelection | None = None,
+        probability: Decimal | None = None,
+        quote: MarketQuote | None = None,
+        quote_source: str = "not_evaluated",
+    ) -> None:
+        if not self._debug_analysis:
+            return
+        self._repository.record_market_analysis(
+            scan_id=scan_id,
+            scanned_at=scanned_at,
+            event_title=str(event.get("title") or event.get("slug") or "unknown_event"),
+            market_slug=str(market.get("slug") or "unknown_market"),
+            market_title=str(market.get("title") or market.get("question") or "unknown_market"),
+            city_slug=city.slug if city else None,
+            target_date=target_date.isoformat() if target_date else None,
+            settlement_time=settlement_time.isoformat() if settlement_time else None,
+            hours_to_settlement=hours_to_settlement,
+            forecast_value=selection.forecast.value if selection else None,
+            forecast_source=selection.forecast.source if selection else None,
+            probability=probability,
+            quote=quote,
+            quote_source=quote_source,
+            decision_reason=decision_reason,
+        )
 
     def _is_within_trade_window(self, hours_to_settlement: Decimal) -> bool:
         return (

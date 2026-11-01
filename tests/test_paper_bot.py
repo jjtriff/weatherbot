@@ -88,13 +88,16 @@ def strategy_settings() -> PaperStrategySettings:
     )
 
 
-def paper_bot(repository: PaperRepository, gateway: FakeGateway | None = None) -> PaperWeatherBot:
+def paper_bot(
+    repository: PaperRepository, gateway: FakeGateway | None = None, *, debug_analysis: bool = False
+) -> PaperWeatherBot:
     return PaperWeatherBot(
         gateway=gateway or FakeGateway(),
         repository=repository,
         strategy_settings=strategy_settings(),
         forecast_selector=FixedForecastSelector(),
         now=lambda: datetime(2026, 10, 31, 12, tzinfo=timezone.utc),
+        debug_analysis=debug_analysis,
     )
 
 
@@ -110,6 +113,27 @@ def test_paper_scan_only_trades_positive_ev_temperature_bucket(tmp_path) -> None
     trade = repository.get_trade("tc-temp-mdwhigh-2026-10-31-gte64lt65f")
     assert trade["entry_price"] == "0.12"
     assert trade["cost"] == "2.00"
+
+
+def test_debug_analysis_records_raw_quote_and_decision_for_every_market(tmp_path) -> None:
+    repository = PaperRepository(tmp_path / "paper.sqlite3")
+
+    paper_bot(repository, debug_analysis=True).scan_once()
+
+    analyses = repository.latest_market_analyses()
+    assert len(analyses) == 3
+    accepted = next(
+        analysis
+        for analysis in analyses
+        if analysis["market_slug"] == "tc-temp-mdwhigh-2026-10-31-gte64lt65f"
+    )
+    assert accepted["decision_reason"] == "accepted"
+    assert accepted["forecast_value"] == "64.5"
+    assert accepted["best_ask"] == "0.12"
+    assert accepted["quote_source"] == "bbo"
+    assert accepted["probability"] is not None
+    assert any(analysis["decision_reason"] == "ev_too_low" for analysis in analyses)
+    assert any(analysis["decision_reason"] == "unsupported_contract" for analysis in analyses)
 
 
 def test_paper_scan_is_idempotent_and_respects_exposure(tmp_path) -> None:

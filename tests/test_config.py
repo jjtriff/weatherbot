@@ -12,6 +12,11 @@ def test_defaults_to_paper_mode_without_credentials() -> None:
 
     assert settings.mode == "paper"
     assert settings.database_path.as_posix() == "data/v3/weatherbot.sqlite3"
+    assert settings.debug_analysis is False
+
+
+def test_debug_analysis_flag_is_explicitly_enabled() -> None:
+    assert load_settings({"WEATHERBOT_DEBUG_ANALYSIS": "1"}).debug_analysis is True
 
 
 def test_live_mode_requires_polymarket_us_credentials() -> None:
