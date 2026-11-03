@@ -22,6 +22,14 @@ class CalibrationUpdate:
     applied: bool
 
 
+def _ensure_column(
+    connection: sqlite3.Connection, table: str, column: str, definition: str
+) -> None:
+    columns = {str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 class PaperRepository:
     """SQLite-backed, idempotent paper-trading and learning ledger."""
 
@@ -73,7 +81,10 @@ class PaperRepository:
                     best_ask TEXT,
                     volume TEXT,
                     quote_source TEXT NOT NULL,
-                    decision_reason TEXT NOT NULL
+                    decision_reason TEXT NOT NULL,
+                    resolution_rule TEXT,
+                    resolution_source TEXT,
+                    resolution_station TEXT
                 )
                 """
             )
@@ -91,6 +102,9 @@ class PaperRepository:
                     observation_count INTEGER NOT NULL,
                     average_brier_score TEXT,
                     decision_reason TEXT NOT NULL,
+                    resolution_rule TEXT,
+                    resolution_source TEXT,
+                    resolution_station TEXT,
                     concluded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
@@ -108,6 +122,10 @@ class PaperRepository:
                 )
                 """
             )
+            for table in ("market_analyses", "market_conclusions"):
+                _ensure_column(connection, table, "resolution_rule", "TEXT")
+                _ensure_column(connection, table, "resolution_source", "TEXT")
+                _ensure_column(connection, table, "resolution_station", "TEXT")
 
     def create_trade(
         self,
@@ -213,6 +231,9 @@ class PaperRepository:
         quote: MarketQuote | None,
         quote_source: str,
         decision_reason: str,
+        resolution_rule: str | None = None,
+        resolution_source: str | None = None,
+        resolution_station: str | None = None,
     ) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -221,8 +242,9 @@ class PaperRepository:
                     scan_id, scanned_at, event_title, market_slug, market_title,
                     city_slug, target_date, settlement_time, hours_to_settlement,
                     forecast_value, forecast_source, probability, best_bid, best_ask,
-                    volume, quote_source, decision_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    volume, quote_source, decision_reason, resolution_rule, resolution_source,
+                    resolution_station
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -242,6 +264,9 @@ class PaperRepository:
                     str(quote.volume) if quote else None,
                     quote_source,
                     decision_reason,
+                    resolution_rule,
+                    resolution_source,
+                    resolution_station,
                 ),
             )
 
@@ -300,8 +325,9 @@ class PaperRepository:
                 """
                 INSERT OR IGNORE INTO market_conclusions (
                     market_slug, settlement, city_slug, target_date, forecast_source,
-                    observation_count, average_brier_score, decision_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    observation_count, average_brier_score, decision_reason, resolution_rule,
+                    resolution_source, resolution_station
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     market_slug,
@@ -312,6 +338,9 @@ class PaperRepository:
                     len(rows),
                     str(average_brier_score) if average_brier_score is not None else None,
                     latest["decision_reason"],
+                    latest["resolution_rule"],
+                    latest["resolution_source"],
+                    latest["resolution_station"],
                 ),
             )
         return cursor.rowcount == 1

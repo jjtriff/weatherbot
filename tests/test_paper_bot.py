@@ -26,6 +26,12 @@ class FakeGateway:
                     {
                         "slug": "tc-temp-mdwhigh-2026-10-31-gte64lt65f",
                         "question": "Highest temperature in Chicago on October 31?",
+                        "description": (
+                            "Will the highest temperature recorded at Chicago Midway Airport (KMDW) "
+                            "in Chicago for 2026-10-31 as reported by the National Weather Service's "
+                            "Climatological Report (Daily) be between 64F and 65F? "
+                            "Outcome verified from NWS Climatological Report."
+                        ),
                         "title": "64 to 65",
                         "endDate": "2026-11-01T11:00:00Z",
                         "closed": False,
@@ -33,6 +39,12 @@ class FakeGateway:
                     {
                         "slug": "tc-temp-mdwhigh-2026-10-31-gte72f",
                         "question": "Highest temperature in Chicago on October 31?",
+                        "description": (
+                            "Will the highest temperature recorded at Chicago Midway Airport (KMDW) "
+                            "in Chicago for 2026-10-31 as reported by the National Weather Service's "
+                            "Climatological Report (Daily) be 72F or above? "
+                            "Outcome verified from NWS Climatological Report."
+                        ),
                         "title": "72 or above",
                         "endDate": "2026-11-01T11:00:00Z",
                         "closed": False,
@@ -136,6 +148,9 @@ def test_debug_analysis_records_raw_quote_and_decision_for_every_market(tmp_path
     assert accepted["forecast_value"] == "64.5"
     assert accepted["best_ask"] == "0.12"
     assert accepted["quote_source"] == "bbo"
+    assert accepted["resolution_source"] == "NWS Climatological Report"
+    assert accepted["resolution_station"] == "KMDW"
+    assert "Outcome verified from NWS Climatological Report." in accepted["resolution_rule"]
     assert accepted["probability"] is not None
     assert any(analysis["decision_reason"] == "ev_too_low" for analysis in analyses)
     assert any(analysis["decision_reason"] == "unsupported_contract" for analysis in analyses)
@@ -256,6 +271,8 @@ def test_reconciliation_records_conclusion_for_a_settled_untraded_bucket(tmp_pat
     conclusion = repository.get_market_conclusion("tc-temp-mdwhigh-2026-10-31-gte72f")
     assert conclusion["settlement"] == 0
     assert conclusion["decision_reason"] == "ev_too_low"
+    assert conclusion["resolution_source"] == "NWS Climatological Report"
+    assert conclusion["resolution_station"] == "KMDW"
     assert Decimal(str(conclusion["average_brier_score"])) > Decimal(0)
 
 

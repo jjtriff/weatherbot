@@ -374,6 +374,7 @@ class PaperWeatherBot:
     ) -> None:
         if not self._debug_analysis:
             return
+        resolution_rule, resolution_source, resolution_station = _resolution_metadata(market)
         self._repository.record_market_analysis(
             scan_id=scan_id,
             scanned_at=scanned_at,
@@ -390,6 +391,9 @@ class PaperWeatherBot:
             quote=quote,
             quote_source=quote_source,
             decision_reason=decision_reason,
+            resolution_rule=resolution_rule,
+            resolution_source=resolution_source,
+            resolution_station=resolution_station,
         )
 
     def _is_within_trade_window(self, hours_to_settlement: Decimal) -> bool:
@@ -435,6 +439,19 @@ def _market_context(
     except (UnsupportedWeatherMarket, ValueError):
         return None
     return slug, target_date, bucket, settlement_time
+
+
+def _resolution_metadata(market: Mapping[str, object]) -> tuple[str | None, str | None, str | None]:
+    rule = str(market.get("description") or "").strip() or None
+    if rule is None:
+        return None, None, None
+    source_match = re.search(r"Outcome verified from ([^.]+)\.", rule, re.IGNORECASE)
+    station_match = re.search(r"\(([A-Z]{4})\)", rule)
+    return (
+        rule,
+        source_match.group(1).strip() if source_match else None,
+        station_match.group(1) if station_match else None,
+    )
 
 
 def _quote_from_market_payload(
