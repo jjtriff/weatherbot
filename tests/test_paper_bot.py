@@ -7,7 +7,13 @@ from decimal import Decimal
 from weatherbot.config import PaperStrategySettings
 from weatherbot.domain import MarketQuote, TemperatureBucket
 from weatherbot.marketplace import MarketplaceError
-from weatherbot.paper import PaperWeatherBot, ReconcileSummary, ScanSummary, write_heartbeat
+from weatherbot.paper import (
+    PaperWeatherBot,
+    ReconcileSummary,
+    ScanSummary,
+    _resolution_metadata,
+    write_heartbeat,
+)
 from weatherbot.probability import bucket_probability
 from weatherbot.repository import PaperRepository
 from weatherbot.weather import Forecast, ForecastSelection
@@ -116,6 +122,21 @@ def paper_bot(
         now=lambda: now or datetime(2026, 10, 31, 12, tzinfo=timezone.utc),
         debug_analysis=debug_analysis,
     )
+
+
+def test_resolution_metadata_accepts_airport_suffix_station_format() -> None:
+    rule, source, station = _resolution_metadata(
+        {
+            "description": (
+                "Will the temperature recorded at San Jose (SJC Airport) be 70F? "
+                "Outcome verified from NWS Climatological Report."
+            )
+        }
+    )
+
+    assert rule is not None
+    assert source == "NWS Climatological Report"
+    assert station == "SJC"
 
 
 def test_paper_scan_only_trades_positive_ev_temperature_bucket(tmp_path) -> None:

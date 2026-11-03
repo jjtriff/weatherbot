@@ -446,7 +446,7 @@ def _resolution_metadata(market: Mapping[str, object]) -> tuple[str | None, str 
     if rule is None:
         return None, None, None
     source_match = re.search(r"Outcome verified from ([^.]+)\.", rule, re.IGNORECASE)
-    station_match = re.search(r"\(([A-Z]{4})\)", rule)
+    station_match = re.search(r"\(([A-Z]{3,4})(?:\s+Airport)?\)", rule)
     return (
         rule,
         source_match.group(1).strip() if source_match else None,
