@@ -237,7 +237,7 @@ def test_reconciliation_records_conclusion_for_a_settled_untraded_bucket(tmp_pat
     assert Decimal(str(conclusion["average_brier_score"])) > Decimal(0)
 
 
-def test_calibration_updates_sigma_after_minimum_resolved_observations(tmp_path) -> None:
+def test_calibration_requires_distinct_resolved_market_days(tmp_path) -> None:
     repository = PaperRepository(tmp_path / "paper.sqlite3")
     for index in range(30):
         market_slug = f"tc-temp-mdwhigh-2026-10-31-gte64lt65f-{index}"
@@ -264,8 +264,41 @@ def test_calibration_updates_sigma_after_minimum_resolved_observations(tmp_path)
         city_slug="chicago", forecast_source="test", default_sigma=Decimal(2)
     )
 
+    assert update.applied is False
+    assert update.market_day_count == 1
+    assert repository.calibrated_sigma("chicago", "test", Decimal(2)) == Decimal(2)
+
+
+def test_calibration_updates_sigma_after_minimum_resolved_observations(tmp_path) -> None:
+    repository = PaperRepository(tmp_path / "paper.sqlite3")
+    for index in range(30):
+        market_slug = f"tc-temp-mdwhigh-2026-10-31-gte64lt65f-{index}"
+        repository.record_market_analysis(
+            scan_id=f"scan-{index}",
+            scanned_at="2026-10-30T12:00:00+00:00",
+            event_title="Highest temperature in Chicago on October 31?",
+            market_slug=market_slug,
+            market_title="64 to 65",
+            city_slug="chicago",
+            target_date=f"2026-10-{index + 1:02d}",
+            settlement_time="2026-11-01T11:00:00+00:00",
+            hours_to_settlement=Decimal(23),
+            forecast_value=Decimal(60),
+            forecast_source="test",
+            probability=Decimal("0.01"),
+            quote=None,
+            quote_source="bbo",
+            decision_reason="ev_too_low",
+        )
+        repository.record_market_conclusion(market_slug, settlement=1)
+
+    update = repository.refresh_forecast_calibration(
+        city_slug="chicago", forecast_source="test", default_sigma=Decimal(2)
+    )
+
     assert update.applied is True
     assert update.observation_count == 30
+    assert update.market_day_count == 30
     assert update.sigma > Decimal(2)
     assert repository.calibrated_sigma("chicago", "test", Decimal(2)) == update.sigma
 
@@ -281,7 +314,7 @@ def test_paper_scan_uses_persisted_calibrated_sigma(tmp_path) -> None:
             market_slug=market_slug,
             market_title="64 to 65",
             city_slug="chicago",
-            target_date="2026-10-31",
+            target_date=f"2026-10-{index + 1:02d}",
             settlement_time="2026-11-01T11:00:00+00:00",
             hours_to_settlement=Decimal(23),
             forecast_value=Decimal(60),

@@ -10,13 +10,14 @@ from weatherbot.discovery import UnsupportedWeatherMarket, parse_temperature_buc
 from weatherbot.domain import MarketQuote, TemperatureBucket
 from weatherbot.probability import bucket_probability
 
-MIN_CALIBRATION_OBSERVATIONS = 30
+MIN_CALIBRATION_MARKET_DAYS = 30
 
 
 @dataclass(frozen=True)
 class CalibrationUpdate:
     sigma: Decimal
     observation_count: int
+    market_day_count: int
     average_brier_score: Decimal | None
     applied: bool
 
@@ -343,33 +344,50 @@ class PaperRepository:
         with self._connect() as connection:
             rows = connection.execute(
                 """
+                WITH latest_per_market AS (
+                    SELECT market_slug, MAX(id) AS latest_id
+                    FROM market_analyses
+                    WHERE city_slug = ?
+                        AND forecast_source = ?
+                        AND forecast_value IS NOT NULL
+                    GROUP BY market_slug
+                )
                 SELECT analysis.forecast_value, analysis.event_title, analysis.market_title,
-                    conclusion.settlement
-                FROM market_analyses AS analysis
+                    analysis.target_date, conclusion.settlement
+                FROM latest_per_market
+                INNER JOIN market_analyses AS analysis ON analysis.id = latest_per_market.latest_id
                 INNER JOIN market_conclusions AS conclusion
                     ON conclusion.market_slug = analysis.market_slug
-                WHERE analysis.city_slug = ?
-                    AND analysis.forecast_source = ?
-                    AND analysis.forecast_value IS NOT NULL
                 """,
                 (city_slug, forecast_source),
             ).fetchall()
-        observations: list[tuple[Decimal, TemperatureBucket, int]] = []
+        observations: list[tuple[Decimal, TemperatureBucket, int, str]] = []
         for row in rows:
             try:
+                target_date = str(row["target_date"] or "")
+                if not target_date:
+                    continue
                 observations.append(
                     (
                         Decimal(str(row["forecast_value"])),
                         parse_temperature_bucket(f"{row['event_title']} {row['market_title']}"),
                         int(row["settlement"]),
+                        target_date,
                     )
                 )
             except (UnsupportedWeatherMarket, ValueError):
                 continue
-        if len(observations) < MIN_CALIBRATION_OBSERVATIONS:
+        market_days = {target_date for _, _, _, target_date in observations}
+        if len(market_days) < MIN_CALIBRATION_MARKET_DAYS:
+            with self._connect() as connection:
+                connection.execute(
+                    "DELETE FROM forecast_calibrations WHERE city_slug = ? AND forecast_source = ?",
+                    (city_slug, forecast_source),
+                )
             return CalibrationUpdate(
                 sigma=default_sigma,
                 observation_count=len(observations),
+                market_day_count=len(market_days),
                 average_brier_score=None,
                 applied=False,
             )
@@ -391,7 +409,7 @@ class PaperRepository:
                     (
                         (bucket_probability(forecast_value, bucket, sigma) - Decimal(settlement))
                         ** 2
-                        for forecast_value, bucket, settlement in observations
+                        for forecast_value, bucket, settlement, _ in observations
                     ),
                     Decimal(0),
                 )
@@ -426,6 +444,7 @@ class PaperRepository:
         return CalibrationUpdate(
             sigma=sigma,
             observation_count=len(observations),
+            market_day_count=len(market_days),
             average_brier_score=average_brier_score,
             applied=True,
         )
