@@ -5,9 +5,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from weatherbot.config import PaperStrategySettings
-from weatherbot.domain import MarketQuote
+from weatherbot.domain import MarketQuote, TemperatureBucket
 from weatherbot.marketplace import MarketplaceError
 from weatherbot.paper import PaperWeatherBot, ReconcileSummary, ScanSummary, write_heartbeat
+from weatherbot.probability import bucket_probability
 from weatherbot.repository import PaperRepository
 from weatherbot.weather import Forecast, ForecastSelection
 
@@ -89,14 +90,18 @@ def strategy_settings() -> PaperStrategySettings:
 
 
 def paper_bot(
-    repository: PaperRepository, gateway: FakeGateway | None = None, *, debug_analysis: bool = False
+    repository: PaperRepository,
+    gateway: FakeGateway | None = None,
+    *,
+    debug_analysis: bool = False,
+    now: datetime | None = None,
 ) -> PaperWeatherBot:
     return PaperWeatherBot(
         gateway=gateway or FakeGateway(),
         repository=repository,
         strategy_settings=strategy_settings(),
         forecast_selector=FixedForecastSelector(),
-        now=lambda: datetime(2026, 10, 31, 12, tzinfo=timezone.utc),
+        now=lambda: now or datetime(2026, 10, 31, 12, tzinfo=timezone.utc),
         debug_analysis=debug_analysis,
     )
 
@@ -212,6 +217,98 @@ def test_reconciliation_keeps_open_trade_when_settlement_is_not_available(tmp_pa
     assert repository.count_open_trades() == 1
 
 
+def test_reconciliation_records_conclusion_for_a_settled_untraded_bucket(tmp_path) -> None:
+    repository = PaperRepository(tmp_path / "paper.sqlite3")
+    gateway = FakeGateway()
+    paper_bot(repository, gateway, debug_analysis=True).scan_once()
+    gateway.settlement_value = 0
+
+    summary = paper_bot(
+        repository,
+        gateway,
+        debug_analysis=True,
+        now=datetime(2026, 11, 1, 12, tzinfo=timezone.utc),
+    ).reconcile_once()
+
+    assert summary.learned_markets == 2
+    conclusion = repository.get_market_conclusion("tc-temp-mdwhigh-2026-10-31-gte72f")
+    assert conclusion["settlement"] == 0
+    assert conclusion["decision_reason"] == "ev_too_low"
+    assert Decimal(str(conclusion["average_brier_score"])) > Decimal(0)
+
+
+def test_calibration_updates_sigma_after_minimum_resolved_observations(tmp_path) -> None:
+    repository = PaperRepository(tmp_path / "paper.sqlite3")
+    for index in range(30):
+        market_slug = f"tc-temp-mdwhigh-2026-10-31-gte64lt65f-{index}"
+        repository.record_market_analysis(
+            scan_id=f"scan-{index}",
+            scanned_at="2026-10-30T12:00:00+00:00",
+            event_title="Highest temperature in Chicago on October 31?",
+            market_slug=market_slug,
+            market_title="64 to 65",
+            city_slug="chicago",
+            target_date="2026-10-31",
+            settlement_time="2026-11-01T11:00:00+00:00",
+            hours_to_settlement=Decimal(23),
+            forecast_value=Decimal(60),
+            forecast_source="test",
+            probability=Decimal("0.01"),
+            quote=None,
+            quote_source="bbo",
+            decision_reason="ev_too_low",
+        )
+        repository.record_market_conclusion(market_slug, settlement=1)
+
+    update = repository.refresh_forecast_calibration(
+        city_slug="chicago", forecast_source="test", default_sigma=Decimal(2)
+    )
+
+    assert update.applied is True
+    assert update.observation_count == 30
+    assert update.sigma > Decimal(2)
+    assert repository.calibrated_sigma("chicago", "test", Decimal(2)) == update.sigma
+
+
+def test_paper_scan_uses_persisted_calibrated_sigma(tmp_path) -> None:
+    repository = PaperRepository(tmp_path / "paper.sqlite3")
+    for index in range(30):
+        market_slug = f"tc-temp-mdwhigh-2026-10-31-gte64lt65f-{index}"
+        repository.record_market_analysis(
+            scan_id=f"scan-{index}",
+            scanned_at="2026-10-30T12:00:00+00:00",
+            event_title="Highest temperature in Chicago on October 31?",
+            market_slug=market_slug,
+            market_title="64 to 65",
+            city_slug="chicago",
+            target_date="2026-10-31",
+            settlement_time="2026-11-01T11:00:00+00:00",
+            hours_to_settlement=Decimal(23),
+            forecast_value=Decimal(60),
+            forecast_source="test",
+            probability=Decimal("0.01"),
+            quote=None,
+            quote_source="bbo",
+            decision_reason="ev_too_low",
+        )
+        repository.record_market_conclusion(market_slug, settlement=1)
+    update = repository.refresh_forecast_calibration(
+        city_slug="chicago", forecast_source="test", default_sigma=Decimal(2)
+    )
+
+    paper_bot(repository, debug_analysis=True).scan_once()
+
+    analysis = next(
+        row
+        for row in repository.latest_market_analyses()
+        if row["market_slug"] == "tc-temp-mdwhigh-2026-10-31-gte64lt65f"
+    )
+    expected = bucket_probability(
+        Decimal("64.5"), TemperatureBucket(lower=Decimal(64), upper=Decimal(65)), update.sigma
+    )
+    assert Decimal(str(analysis["probability"])) == expected
+
+
 def test_runner_heartbeat_records_cycle_status(tmp_path) -> None:
     heartbeat_path = tmp_path / "paper-run-heartbeat.json"
 
@@ -225,8 +322,10 @@ def test_runner_heartbeat_records_cycle_status(tmp_path) -> None:
     )
 
     assert json.loads(heartbeat_path.read_text()) == {
+        "calibration_updates": 0,
         "discovered": 5,
         "hypothetical_pnl": "3.25",
+        "learned_markets": 0,
         "new_paper_trades": 1,
         "positive_outcomes": 1,
         "rejections": {"ev_too_low": 4},

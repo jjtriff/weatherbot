@@ -46,6 +46,8 @@ class ReconcileSummary:
     settled: int
     positive_outcomes: int
     hypothetical_pnl: Decimal
+    learned_markets: int = 0
+    calibration_updates: int = 0
 
 
 class PaperWeatherBot:
@@ -193,7 +195,12 @@ class PaperWeatherBot:
                             decision_reason="quote_unavailable",
                         )
                         continue
-                sigma = Decimal("2.0") if city.temperature_unit == "fahrenheit" else Decimal("1.2")
+                default_sigma = (
+                    Decimal("2.0") if city.temperature_unit == "fahrenheit" else Decimal("1.2")
+                )
+                sigma = self._repository.calibrated_sigma(
+                    city.slug, selection.forecast.source, default_sigma
+                )
                 probability = bucket_probability(selection.forecast.value, bucket, sigma)
                 decision = evaluate_candidate(
                     market_slug=slug,
@@ -262,6 +269,9 @@ class PaperWeatherBot:
         settled = 0
         positive_outcomes = 0
         pnl = Decimal(0)
+        learned_markets = 0
+        calibration_updates = 0
+        refreshed_calibrations: set[tuple[str, str]] = set()
         for trade in self._repository.open_trades():
             market_slug = str(trade["market_slug"])
             try:
@@ -269,17 +279,55 @@ class PaperWeatherBot:
             except MarketplaceError:
                 continue
             raw_settlement = response.get("settlement")
-            if raw_settlement not in {0, 1}:
+            if type(raw_settlement) is not int or raw_settlement not in {0, 1}:
                 continue
-            trade_pnl = self._repository.settle_trade(market_slug, int(raw_settlement))
+            trade_pnl = self._repository.settle_trade(market_slug, raw_settlement)
             if trade_pnl is None:
                 continue
             settled += 1
             pnl += trade_pnl
             if raw_settlement == 1:
                 positive_outcomes += 1
+        now = self._now()
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        for market_slug in self._repository.unresolved_observed_market_slugs(now.isoformat()):
+            try:
+                response = self._gateway.get_settlement(market_slug)
+            except MarketplaceError:
+                continue
+            raw_settlement = response.get("settlement")
+            if type(raw_settlement) is not int or raw_settlement not in {0, 1}:
+                continue
+            if self._repository.record_market_conclusion(market_slug, raw_settlement):
+                learned_markets += 1
+                conclusion = self._repository.get_market_conclusion(market_slug)
+                city_slug = str(conclusion["city_slug"] or "")
+                forecast_source = str(conclusion["forecast_source"] or "")
+                calibration_key = (city_slug, forecast_source)
+                city = CITIES.get(city_slug)
+                if (
+                    city is not None
+                    and forecast_source
+                    and calibration_key not in refreshed_calibrations
+                ):
+                    default_sigma = (
+                        Decimal("2.0") if city.temperature_unit == "fahrenheit" else Decimal("1.2")
+                    )
+                    update = self._repository.refresh_forecast_calibration(
+                        city_slug=city_slug,
+                        forecast_source=forecast_source,
+                        default_sigma=default_sigma,
+                    )
+                    refreshed_calibrations.add(calibration_key)
+                    if update.applied:
+                        calibration_updates += 1
         return ReconcileSummary(
-            settled=settled, positive_outcomes=positive_outcomes, hypothetical_pnl=pnl
+            settled=settled,
+            positive_outcomes=positive_outcomes,
+            hypothetical_pnl=pnl,
+            learned_markets=learned_markets,
+            calibration_updates=calibration_updates,
         )
 
     def run_forever(self, interval_seconds: int) -> None:
@@ -299,7 +347,9 @@ class PaperWeatherBot:
                 "paper_cycle "
                 f"discovered={scan.discovered} new_paper_trades={scan.paper_trades} "
                 f"rejections={format_rejections(scan.rejections)} "
-                f"settled={reconciliation.settled} positive_outcomes={reconciliation.positive_outcomes} "
+                f"settled={reconciliation.settled} learned_markets={reconciliation.learned_markets} "
+                f"calibration_updates={reconciliation.calibration_updates} "
+                f"positive_outcomes={reconciliation.positive_outcomes} "
                 f"hypothetical_pnl={reconciliation.hypothetical_pnl}",
                 flush=True,
             )
@@ -429,6 +479,8 @@ def write_heartbeat(
         "new_paper_trades": scan.paper_trades,
         "rejections": dict(scan.rejections),
         "settled": reconciliation.settled,
+        "learned_markets": reconciliation.learned_markets,
+        "calibration_updates": reconciliation.calibration_updates,
         "positive_outcomes": reconciliation.positive_outcomes,
         "hypothetical_pnl": str(reconciliation.hypothetical_pnl),
     }

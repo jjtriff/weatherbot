@@ -2,10 +2,23 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Mapping
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
-from weatherbot.domain import MarketQuote
+from weatherbot.discovery import UnsupportedWeatherMarket, parse_temperature_bucket
+from weatherbot.domain import MarketQuote, TemperatureBucket
+from weatherbot.probability import bucket_probability
+
+MIN_CALIBRATION_OBSERVATIONS = 30
+
+
+@dataclass(frozen=True)
+class CalibrationUpdate:
+    sigma: Decimal
+    observation_count: int
+    average_brier_score: Decimal | None
+    applied: bool
 
 
 class PaperRepository:
@@ -65,6 +78,34 @@ class PaperRepository:
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS market_analyses_scan_id ON market_analyses(scan_id, id)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS market_conclusions (
+                    market_slug TEXT PRIMARY KEY,
+                    settlement INTEGER NOT NULL CHECK(settlement IN (0, 1)),
+                    city_slug TEXT,
+                    target_date TEXT,
+                    forecast_source TEXT,
+                    observation_count INTEGER NOT NULL,
+                    average_brier_score TEXT,
+                    decision_reason TEXT NOT NULL,
+                    concluded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS forecast_calibrations (
+                    city_slug TEXT NOT NULL,
+                    forecast_source TEXT NOT NULL,
+                    sigma TEXT NOT NULL,
+                    observation_count INTEGER NOT NULL,
+                    average_brier_score TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (city_slug, forecast_source)
+                )
+                """
             )
 
     def create_trade(
@@ -214,3 +255,177 @@ class PaperRepository:
                 "SELECT * FROM market_analyses WHERE scan_id = ? ORDER BY id", (row["scan_id"],)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def unresolved_observed_market_slugs(self, settled_before: str) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT analysis.market_slug
+                FROM market_analyses AS analysis
+                LEFT JOIN market_conclusions AS conclusion
+                    ON conclusion.market_slug = analysis.market_slug
+                WHERE analysis.settlement_time IS NOT NULL
+                    AND analysis.settlement_time <= ?
+                    AND conclusion.market_slug IS NULL
+                ORDER BY analysis.market_slug
+                """,
+                (settled_before,),
+            ).fetchall()
+        return [str(row["market_slug"]) for row in rows]
+
+    def record_market_conclusion(self, market_slug: str, settlement: int) -> bool:
+        if settlement not in {0, 1}:
+            raise ValueError("settlement must be 0 or 1")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM market_analyses WHERE market_slug = ? ORDER BY id", (market_slug,)
+            ).fetchall()
+            if not rows:
+                raise KeyError(market_slug)
+            probabilities = [
+                Decimal(str(row["probability"])) for row in rows if row["probability"] is not None
+            ]
+            average_brier_score = (
+                sum(
+                    ((probability - Decimal(settlement)) ** 2 for probability in probabilities),
+                    Decimal(0),
+                )
+                / Decimal(len(probabilities))
+                if probabilities
+                else None
+            )
+            latest = rows[-1]
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO market_conclusions (
+                    market_slug, settlement, city_slug, target_date, forecast_source,
+                    observation_count, average_brier_score, decision_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    market_slug,
+                    settlement,
+                    latest["city_slug"],
+                    latest["target_date"],
+                    latest["forecast_source"],
+                    len(rows),
+                    str(average_brier_score) if average_brier_score is not None else None,
+                    latest["decision_reason"],
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def get_market_conclusion(self, market_slug: str) -> Mapping[str, object]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM market_conclusions WHERE market_slug = ?", (market_slug,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(market_slug)
+        return dict(row)
+
+    def calibrated_sigma(
+        self, city_slug: str, forecast_source: str, default_sigma: Decimal
+    ) -> Decimal:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT sigma FROM forecast_calibrations
+                WHERE city_slug = ? AND forecast_source = ?
+                """,
+                (city_slug, forecast_source),
+            ).fetchone()
+        return default_sigma if row is None else Decimal(str(row["sigma"]))
+
+    def refresh_forecast_calibration(
+        self, *, city_slug: str, forecast_source: str, default_sigma: Decimal
+    ) -> CalibrationUpdate:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT analysis.forecast_value, analysis.event_title, analysis.market_title,
+                    conclusion.settlement
+                FROM market_analyses AS analysis
+                INNER JOIN market_conclusions AS conclusion
+                    ON conclusion.market_slug = analysis.market_slug
+                WHERE analysis.city_slug = ?
+                    AND analysis.forecast_source = ?
+                    AND analysis.forecast_value IS NOT NULL
+                """,
+                (city_slug, forecast_source),
+            ).fetchall()
+        observations: list[tuple[Decimal, TemperatureBucket, int]] = []
+        for row in rows:
+            try:
+                observations.append(
+                    (
+                        Decimal(str(row["forecast_value"])),
+                        parse_temperature_bucket(f"{row['event_title']} {row['market_title']}"),
+                        int(row["settlement"]),
+                    )
+                )
+            except (UnsupportedWeatherMarket, ValueError):
+                continue
+        if len(observations) < MIN_CALIBRATION_OBSERVATIONS:
+            return CalibrationUpdate(
+                sigma=default_sigma,
+                observation_count=len(observations),
+                average_brier_score=None,
+                applied=False,
+            )
+        candidates = tuple(
+            default_sigma * multiplier
+            for multiplier in (
+                Decimal("0.50"),
+                Decimal("0.75"),
+                Decimal("1.00"),
+                Decimal("1.25"),
+                Decimal("1.50"),
+                Decimal("1.75"),
+                Decimal("2.00"),
+            )
+        )
+        scored = [
+            (
+                sum(
+                    (
+                        (bucket_probability(forecast_value, bucket, sigma) - Decimal(settlement))
+                        ** 2
+                        for forecast_value, bucket, settlement in observations
+                    ),
+                    Decimal(0),
+                )
+                / Decimal(len(observations)),
+                sigma,
+            )
+            for sigma in candidates
+        ]
+        average_brier_score, sigma = min(
+            scored, key=lambda score: (score[0], abs(score[1] - default_sigma))
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO forecast_calibrations (
+                    city_slug, forecast_source, sigma, observation_count, average_brier_score, updated_at
+                ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(city_slug, forecast_source) DO UPDATE SET
+                    sigma = excluded.sigma,
+                    observation_count = excluded.observation_count,
+                    average_brier_score = excluded.average_brier_score,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    city_slug,
+                    forecast_source,
+                    str(sigma),
+                    len(observations),
+                    str(average_brier_score),
+                ),
+            )
+        return CalibrationUpdate(
+            sigma=sigma,
+            observation_count=len(observations),
+            average_brier_score=average_brier_score,
+            applied=True,
+        )
