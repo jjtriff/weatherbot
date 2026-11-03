@@ -62,7 +62,9 @@ def main() -> None:
         print(
             f"paper_scan discovered={summary.discovered} new_paper_trades={summary.paper_trades} "
             f"rejections={format_rejections(summary.rejections)} "
-            f"settled={reconciliation.settled} positive_outcomes={reconciliation.positive_outcomes} "
+            f"settled={reconciliation.settled} learned_markets={reconciliation.learned_markets} "
+            f"calibration_updates={reconciliation.calibration_updates} "
+            f"positive_outcomes={reconciliation.positive_outcomes} "
             f"hypothetical_pnl={reconciliation.hypothetical_pnl}"
         )
     elif arguments.command == "paper-run":
