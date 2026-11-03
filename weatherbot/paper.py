@@ -278,15 +278,15 @@ class PaperWeatherBot:
                 response = self._gateway.get_settlement(market_slug)
             except MarketplaceError:
                 continue
-            raw_settlement = response.get("settlement")
-            if type(raw_settlement) is not int or raw_settlement not in {0, 1}:
+            settlement = _settlement_value(response, market_slug)
+            if settlement is None:
                 continue
-            trade_pnl = self._repository.settle_trade(market_slug, raw_settlement)
+            trade_pnl = self._repository.settle_trade(market_slug, settlement)
             if trade_pnl is None:
                 continue
             settled += 1
             pnl += trade_pnl
-            if raw_settlement == 1:
+            if settlement == 1:
                 positive_outcomes += 1
         now = self._now()
         if now.tzinfo is None:
@@ -296,10 +296,10 @@ class PaperWeatherBot:
                 response = self._gateway.get_settlement(market_slug)
             except MarketplaceError:
                 continue
-            raw_settlement = response.get("settlement")
-            if type(raw_settlement) is not int or raw_settlement not in {0, 1}:
+            settlement = _settlement_value(response, market_slug)
+            if settlement is None:
                 continue
-            if self._repository.record_market_conclusion(market_slug, raw_settlement):
+            if self._repository.record_market_conclusion(market_slug, settlement):
                 learned_markets += 1
                 conclusion = self._repository.get_market_conclusion(market_slug)
                 city_slug = str(conclusion["city_slug"] or "")
@@ -457,6 +457,19 @@ def _quote_value(value: object) -> Decimal | None:
     if isinstance(value, Mapping):
         return _quote_value(value.get("value"))
     return Decimal(str(value))
+
+
+def _settlement_value(response: Mapping[str, object], market_slug: str) -> int | None:
+    response_slug = response.get("slug")
+    if response_slug is not None and str(response_slug) != market_slug:
+        return None
+    raw_settlement = response.get("settlement")
+    if isinstance(raw_settlement, bool) or not isinstance(raw_settlement, (int, float, Decimal)):
+        return None
+    settlement = Decimal(str(raw_settlement))
+    if settlement not in {Decimal(0), Decimal(1)}:
+        return None
+    return int(settlement)
 
 
 def format_rejections(rejections: Mapping[str, int]) -> str:

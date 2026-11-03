@@ -15,7 +15,7 @@ from weatherbot.weather import Forecast, ForecastSelection
 
 class FakeGateway:
     def __init__(self) -> None:
-        self.settlement_value: int | None = None
+        self.settlement_value: int | float | None = None
 
     def list_events(self) -> list[dict[str, object]]:
         return [
@@ -217,11 +217,33 @@ def test_reconciliation_keeps_open_trade_when_settlement_is_not_available(tmp_pa
     assert repository.count_open_trades() == 1
 
 
+def test_reconciliation_ignores_settlement_for_a_different_market_slug(tmp_path) -> None:
+    repository = PaperRepository(tmp_path / "paper.sqlite3")
+
+    class WrongSlugGateway(FakeGateway):
+        def get_settlement(self, market_slug: str) -> dict[str, object]:
+            return {"slug": "different-market", "settlement": 1.0}
+
+    bot = paper_bot(repository, WrongSlugGateway(), debug_analysis=True)
+    bot.scan_once()
+
+    summary = paper_bot(
+        repository,
+        WrongSlugGateway(),
+        debug_analysis=True,
+        now=datetime(2026, 11, 1, 12, tzinfo=timezone.utc),
+    ).reconcile_once()
+
+    assert summary.settled == 0
+    assert summary.learned_markets == 0
+    assert repository.count_open_trades() == 1
+
+
 def test_reconciliation_records_conclusion_for_a_settled_untraded_bucket(tmp_path) -> None:
     repository = PaperRepository(tmp_path / "paper.sqlite3")
     gateway = FakeGateway()
     paper_bot(repository, gateway, debug_analysis=True).scan_once()
-    gateway.settlement_value = 0
+    gateway.settlement_value = 0.0
 
     summary = paper_bot(
         repository,
