@@ -216,6 +216,31 @@ def test_paper_scan_verifies_rejecting_search_quote_with_live_bbo(tmp_path) -> N
     assert "tc-temp-mdwhigh-2026-10-31-gte64lt65f" in gateway.bbo_requests
 
 
+def test_paper_scan_defers_live_bbo_verification_for_future_market_dates(tmp_path) -> None:
+    repository = PaperRepository(tmp_path / "paper.sqlite3")
+
+    class FutureSearchQuoteGateway(FakeGateway):
+        def list_events(self) -> list[dict[str, object]]:
+            events = super().list_events()
+            market = events[0]["markets"][0]
+            assert isinstance(market, dict)
+            market["slug"] = "tc-temp-mdwhigh-2026-11-01-gte64lt65f"
+            market["endDate"] = "2026-11-02T11:00:00Z"
+            market["bestBidQuote"] = {"value": "0.11", "currency": "USD"}
+            market["bestAskQuote"] = {"value": "0.12", "currency": "USD"}
+            market["sharesTraded"] = "0"
+            return events
+
+        def get_bbo(self, market_slug: str) -> MarketQuote:
+            if market_slug.endswith("gte64lt65f"):
+                raise AssertionError("future market should not use live BBO verification")
+            return super().get_bbo(market_slug)
+
+    summary = paper_bot(repository, FutureSearchQuoteGateway()).scan_once()
+
+    assert summary.rejections["volume_too_low"] == 1
+
+
 def test_paper_scan_skips_temporarily_unavailable_bbo_without_failing(tmp_path) -> None:
     repository = PaperRepository(tmp_path / "paper.sqlite3")
 

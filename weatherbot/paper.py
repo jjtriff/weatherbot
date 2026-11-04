@@ -19,7 +19,7 @@ from weatherbot.marketplace import MarketplaceError
 from weatherbot.probability import bucket_probability
 from weatherbot.repository import PaperRepository
 from weatherbot.strategy import RiskPolicy, evaluate_candidate
-from weatherbot.weather import CITIES, City, ForecastSelection
+from weatherbot.weather import CITIES, City, ForecastSelection, local_market_date
 
 
 class PaperMarketplaceGateway(Protocol):
@@ -176,7 +176,10 @@ class PaperWeatherBot:
                     continue
                 quote = _quote_from_market_payload(slug, market)
                 quote_source = "search" if quote is not None else "bbo"
-                should_verify = quote is None or self._requires_live_bbo(quote)
+                is_current_market_date = target_date == local_market_date(now, city.timezone)
+                should_verify = is_current_market_date and (
+                    quote is None or self._requires_live_bbo(quote)
+                )
                 if should_verify:
                     try:
                         live_quote = self._gateway.get_bbo(slug)
@@ -200,7 +203,22 @@ class PaperWeatherBot:
                     else:
                         quote = live_quote
                         quote_source = "bbo"
-                assert quote is not None
+                if quote is None:
+                    rejections["missing_bbo"] += 1
+                    self._record_analysis(
+                        scan_id=scan_id,
+                        scanned_at=scanned_at,
+                        event=event,
+                        market=market,
+                        city=city,
+                        target_date=target_date,
+                        settlement_time=settlement_time,
+                        hours_to_settlement=hours_to_settlement,
+                        selection=selection,
+                        quote_source=quote_source,
+                        decision_reason="missing_bbo",
+                    )
+                    continue
                 default_sigma = (
                     Decimal("2.0") if city.temperature_unit == "fahrenheit" else Decimal("1.2")
                 )
