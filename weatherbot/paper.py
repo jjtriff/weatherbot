@@ -176,25 +176,31 @@ class PaperWeatherBot:
                     continue
                 quote = _quote_from_market_payload(slug, market)
                 quote_source = "search" if quote is not None else "bbo"
-                if quote is None:
+                should_verify = quote is None or self._requires_live_bbo(quote)
+                if should_verify:
                     try:
-                        quote = self._gateway.get_bbo(slug)
+                        live_quote = self._gateway.get_bbo(slug)
                     except MarketplaceError:
-                        rejections["quote_unavailable"] += 1
-                        self._record_analysis(
-                            scan_id=scan_id,
-                            scanned_at=scanned_at,
-                            event=event,
-                            market=market,
-                            city=city,
-                            target_date=target_date,
-                            settlement_time=settlement_time,
-                            hours_to_settlement=hours_to_settlement,
-                            selection=selection,
-                            quote_source="unavailable",
-                            decision_reason="quote_unavailable",
-                        )
-                        continue
+                        if quote is None:
+                            rejections["quote_unavailable"] += 1
+                            self._record_analysis(
+                                scan_id=scan_id,
+                                scanned_at=scanned_at,
+                                event=event,
+                                market=market,
+                                city=city,
+                                target_date=target_date,
+                                settlement_time=settlement_time,
+                                hours_to_settlement=hours_to_settlement,
+                                selection=selection,
+                                quote_source="unavailable",
+                                decision_reason="quote_unavailable",
+                            )
+                            continue
+                    else:
+                        quote = live_quote
+                        quote_source = "bbo"
+                assert quote is not None
                 default_sigma = (
                     Decimal("2.0") if city.temperature_unit == "fahrenheit" else Decimal("1.2")
                 )
@@ -354,6 +360,14 @@ class PaperWeatherBot:
                 flush=True,
             )
             time.sleep(interval_seconds)
+
+    def _requires_live_bbo(self, quote: MarketQuote) -> bool:
+        if quote.best_bid is None or quote.best_ask is None:
+            return True
+        return (
+            quote.volume < self._strategy_settings.min_volume
+            or quote.best_ask - quote.best_bid > self._strategy_settings.max_spread
+        )
 
     def _record_analysis(
         self,
