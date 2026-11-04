@@ -182,7 +182,7 @@ class PaperWeatherBot:
                 )
                 if should_verify:
                     try:
-                        live_quote = self._gateway.get_bbo(slug)
+                        live_quote = self._get_live_bbo(slug)
                     except MarketplaceError:
                         if quote is None:
                             rejections["quote_unavailable"] += 1
@@ -200,6 +200,7 @@ class PaperWeatherBot:
                                 decision_reason="quote_unavailable",
                             )
                             continue
+                        quote_source = "search_bbo_retry_failed"
                     else:
                         quote = live_quote
                         quote_source = "bbo"
@@ -378,6 +379,18 @@ class PaperWeatherBot:
                 flush=True,
             )
             time.sleep(interval_seconds)
+
+    def _get_live_bbo(self, market_slug: str) -> MarketQuote:
+        last_error: MarketplaceError | None = None
+        for attempt in range(3):
+            try:
+                return self._gateway.get_bbo(market_slug)
+            except MarketplaceError as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.2 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
 
     def _requires_live_bbo(self, quote: MarketQuote) -> bool:
         if quote.best_bid is None or quote.best_ask is None:

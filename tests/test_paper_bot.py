@@ -216,6 +216,36 @@ def test_paper_scan_verifies_rejecting_search_quote_with_live_bbo(tmp_path) -> N
     assert "tc-temp-mdwhigh-2026-10-31-gte64lt65f" in gateway.bbo_requests
 
 
+def test_paper_scan_retries_transient_live_bbo_failure(tmp_path) -> None:
+    repository = PaperRepository(tmp_path / "paper.sqlite3")
+
+    class TransientBboGateway(FakeGateway):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        def list_events(self) -> list[dict[str, object]]:
+            events = super().list_events()
+            market = events[0]["markets"][0]
+            assert isinstance(market, dict)
+            market["bestBidQuote"] = {"value": "0.11", "currency": "USD"}
+            market["bestAskQuote"] = {"value": "0.12", "currency": "USD"}
+            market["sharesTraded"] = "0"
+            return events
+
+        def get_bbo(self, market_slug: str) -> MarketQuote:
+            if market_slug.endswith("gte64lt65f"):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise MarketplaceError("temporary API failure")
+            return super().get_bbo(market_slug)
+
+    gateway = TransientBboGateway()
+
+    assert paper_bot(repository, gateway).scan_once().paper_trades == 1
+    assert gateway.attempts == 2
+
+
 def test_paper_scan_defers_live_bbo_verification_for_future_market_dates(tmp_path) -> None:
     repository = PaperRepository(tmp_path / "paper.sqlite3")
 
