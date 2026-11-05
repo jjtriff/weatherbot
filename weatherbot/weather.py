@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -33,6 +33,7 @@ class ForecastSelection:
     forecast: Forecast
     reason: str
     disagreement: Decimal | None
+    forecasts: tuple[Forecast, ...] = ()
 
 
 CITIES: Mapping[str, City] = {
@@ -150,16 +151,69 @@ class OpenMeteoProvider:
         return None
 
 
-class ForecastSelector:
-    """Select the first available configured forecast and retain source spread."""
+class VisualCrossingProvider:
+    """Station-coordinate daily high forecasts from Visual Crossing Timeline API."""
 
-    def __init__(self, *, providers: Sequence[WeatherProvider]) -> None:
+    source = "visual-crossing:timeline"
+    _url = "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline"
+
+    def __init__(self, *, api_key: str, session: HttpSession) -> None:
+        self._api_key = api_key
+        self._session = session
+
+    def daily_high(self, city: City, target_date: date) -> Forecast | None:
+        response = self._session.get(
+            f"{self._url}/{city.latitude},{city.longitude}/{target_date.isoformat()}",
+            params={
+                "unitGroup": "us" if city.temperature_unit == "fahrenheit" else "metric",
+                "include": "days",
+                "elements": "datetime,tempmax",
+                "key": self._api_key,
+                "contentType": "json",
+            },
+            timeout=(5, 10),
+        )
+        payload = response.json()
+        days = payload.get("days")
+        if not isinstance(days, list):
+            return None
+        for day in days:
+            if not isinstance(day, Mapping) or day.get("datetime") != target_date.isoformat():
+                continue
+            temperature = day.get("tempmax")
+            if temperature is None:
+                continue
+            return Forecast(
+                city_slug=city.slug,
+                station=city.station,
+                target_date=target_date,
+                value=Decimal(str(temperature)),
+                source=self.source,
+            )
+        return None
+
+
+class ForecastSelector:
+    """Select a primary forecast and query secondary providers for the current market day."""
+
+    def __init__(
+        self,
+        *,
+        providers: Sequence[WeatherProvider],
+        current_day_providers: Sequence[WeatherProvider] = (),
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
         self._providers = tuple(providers)
+        self._current_day_providers = tuple(current_day_providers)
+        self._now = now or (lambda: datetime.now(ZoneInfo("UTC")))
 
     def select(self, city: City, target_date: date) -> ForecastSelection | None:
+        providers = self._providers
+        if target_date == local_market_date(self._now(), city.timezone):
+            providers += self._current_day_providers
         forecasts = [
             forecast
-            for provider in self._providers
+            for provider in providers
             if (forecast := provider.daily_high(city, target_date)) is not None
         ]
         if not forecasts:
@@ -170,6 +224,7 @@ class ForecastSelector:
             forecast=forecasts[0],
             reason="first_available_provider",
             disagreement=disagreement,
+            forecasts=tuple(forecasts),
         )
 
 

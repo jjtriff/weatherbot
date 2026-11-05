@@ -8,6 +8,7 @@ from weatherbot.weather import (
     Forecast,
     ForecastSelector,
     OpenMeteoProvider,
+    VisualCrossingProvider,
     local_market_date,
 )
 
@@ -70,6 +71,37 @@ def test_open_meteo_forecast_uses_station_coordinates_and_explicit_model() -> No
     ]
 
 
+def test_visual_crossing_forecast_uses_target_date_and_station_coordinates() -> None:
+    session = FakeSession(
+        {
+            "days": [
+                {"datetime": "2026-11-01", "tempmax": Decimal("68.8")},
+            ]
+        }
+    )
+    provider = VisualCrossingProvider(api_key="test-key", session=session)
+
+    forecast = provider.daily_high(CITIES["chicago"], date(2026, 11, 1))
+
+    assert forecast is not None
+    assert forecast.value == Decimal("68.8")
+    assert forecast.source == "visual-crossing:timeline"
+    assert forecast.station == "KMDW"
+    assert session.calls == [
+        {
+            "url": "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/41.7868,-87.7522/2026-11-01",
+            "params": {
+                "unitGroup": "us",
+                "include": "days",
+                "elements": "datetime,tempmax",
+                "key": "test-key",
+                "contentType": "json",
+            },
+            "timeout": (5, 10),
+        }
+    ]
+
+
 def test_open_meteo_returns_none_when_target_date_has_no_value() -> None:
     session = FakeSession({"daily": {"time": ["2026-11-01"], "temperature_2m_max": [None]}})
 
@@ -80,6 +112,44 @@ def test_local_market_date_preserves_market_timezone_across_utc_boundary() -> No
     now = datetime(2026, 11, 1, 3, 30, tzinfo=timezone.utc)
 
     assert local_market_date(now, CITIES["los-angeles"].timezone) == date(2026, 10, 31)
+
+
+def test_forecast_selector_queries_secondary_provider_only_for_current_local_day() -> None:
+    class StaticProvider:
+        def __init__(self, source: str, value: str) -> None:
+            self.source = source
+            self.value = Decimal(value)
+            self.calls: list[date] = []
+
+        def daily_high(self, city, target_date):
+            self.calls.append(target_date)
+            return Forecast(
+                city_slug=city.slug,
+                station=city.station,
+                target_date=target_date,
+                value=self.value,
+                source=self.source,
+            )
+
+    primary = StaticProvider("primary", "70.0")
+    visual_crossing = StaticProvider("visual-crossing:timeline", "71.0")
+    selector = ForecastSelector(
+        providers=[primary],
+        current_day_providers=[visual_crossing],
+        now=lambda: datetime(2026, 10, 31, 12, tzinfo=timezone.utc),
+    )
+
+    current = selector.select(CITIES["chicago"], date(2026, 10, 31))
+    future = selector.select(CITIES["chicago"], date(2026, 11, 1))
+
+    assert current is not None
+    assert tuple(forecast.source for forecast in current.forecasts) == (
+        "primary",
+        "visual-crossing:timeline",
+    )
+    assert future is not None
+    assert tuple(forecast.source for forecast in future.forecasts) == ("primary",)
+    assert visual_crossing.calls == [date(2026, 10, 31)]
 
 
 def test_forecast_selector_records_selected_source_and_disagreement() -> None:

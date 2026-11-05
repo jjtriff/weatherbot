@@ -16,7 +16,12 @@ from weatherbot.config import (
 from weatherbot.marketplace import PolymarketUSGateway
 from weatherbot.paper import PaperWeatherBot, format_rejections
 from weatherbot.repository import PaperRepository
-from weatherbot.weather import ForecastSelector, HttpSession, OpenMeteoProvider
+from weatherbot.weather import (
+    ForecastSelector,
+    HttpSession,
+    OpenMeteoProvider,
+    VisualCrossingProvider,
+)
 
 
 def _paper_bot(database_override: str | None) -> PaperWeatherBot:
@@ -30,12 +35,20 @@ def _paper_bot(database_override: str | None) -> PaperWeatherBot:
         else settings.database_path.with_name(database_override)
     )
     strategy_path = Path(os.environ.get("WEATHERBOT_STRATEGY_CONFIG", "config.json"))
+    strategy_settings = load_paper_strategy_settings(strategy_path)
+    session = cast(HttpSession, requests.Session())
+    current_day_providers = (
+        [VisualCrossingProvider(api_key=strategy_settings.visual_crossing_key, session=session)]
+        if strategy_settings.visual_crossing_key
+        else []
+    )
     return PaperWeatherBot(
         gateway=PolymarketUSGateway.public(),
         repository=PaperRepository(database_path),
-        strategy_settings=load_paper_strategy_settings(strategy_path),
+        strategy_settings=strategy_settings,
         forecast_selector=ForecastSelector(
-            providers=[OpenMeteoProvider(session=cast(HttpSession, requests.Session()))]
+            providers=[OpenMeteoProvider(session=session)],
+            current_day_providers=current_day_providers,
         ),
         heartbeat_path=database_path.with_name("paper-run-heartbeat.json"),
         debug_analysis=settings.debug_analysis,
@@ -95,6 +108,10 @@ def main() -> None:
                         str(record["market_title"]),
                         f"reason={record['decision_reason']}",
                         f"forecast={record['forecast_value']}",
+                        f"forecast_source={record['forecast_source']}",
+                        f"secondary_forecast={record['secondary_forecast_value']}",
+                        f"secondary_source={record['secondary_forecast_source']}",
+                        f"forecast_disagreement={record['forecast_disagreement']}",
                         f"probability={record['probability']}",
                         f"bid={record['best_bid']}",
                         f"ask={record['best_ask']}",

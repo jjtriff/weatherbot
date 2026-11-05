@@ -76,6 +76,9 @@ class PaperRepository:
                     hours_to_settlement TEXT,
                     forecast_value TEXT,
                     forecast_source TEXT,
+                    secondary_forecast_value TEXT,
+                    secondary_forecast_source TEXT,
+                    forecast_disagreement TEXT,
                     probability TEXT,
                     best_bid TEXT,
                     best_ask TEXT,
@@ -122,6 +125,9 @@ class PaperRepository:
                 )
                 """
             )
+            _ensure_column(connection, "market_analyses", "secondary_forecast_value", "TEXT")
+            _ensure_column(connection, "market_analyses", "secondary_forecast_source", "TEXT")
+            _ensure_column(connection, "market_analyses", "forecast_disagreement", "TEXT")
             for table in ("market_analyses", "market_conclusions"):
                 _ensure_column(connection, table, "resolution_rule", "TEXT")
                 _ensure_column(connection, table, "resolution_source", "TEXT")
@@ -234,6 +240,9 @@ class PaperRepository:
         resolution_rule: str | None = None,
         resolution_source: str | None = None,
         resolution_station: str | None = None,
+        secondary_forecast_value: Decimal | None = None,
+        secondary_forecast_source: str | None = None,
+        forecast_disagreement: Decimal | None = None,
     ) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -241,10 +250,11 @@ class PaperRepository:
                 INSERT INTO market_analyses (
                     scan_id, scanned_at, event_title, market_slug, market_title,
                     city_slug, target_date, settlement_time, hours_to_settlement,
-                    forecast_value, forecast_source, probability, best_bid, best_ask,
+                    forecast_value, forecast_source, secondary_forecast_value,
+                    secondary_forecast_source, forecast_disagreement, probability, best_bid, best_ask,
                     volume, quote_source, decision_reason, resolution_rule, resolution_source,
                     resolution_station
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -258,6 +268,9 @@ class PaperRepository:
                     str(hours_to_settlement) if hours_to_settlement is not None else None,
                     str(forecast_value) if forecast_value is not None else None,
                     forecast_source,
+                    str(secondary_forecast_value) if secondary_forecast_value is not None else None,
+                    secondary_forecast_source,
+                    str(forecast_disagreement) if forecast_disagreement is not None else None,
                     str(probability) if probability is not None else None,
                     str(quote.best_bid) if quote and quote.best_bid is not None else None,
                     str(quote.best_ask) if quote and quote.best_ask is not None else None,

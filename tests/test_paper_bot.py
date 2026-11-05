@@ -177,6 +177,49 @@ def test_debug_analysis_records_raw_quote_and_decision_for_every_market(tmp_path
     assert any(analysis["decision_reason"] == "unsupported_contract" for analysis in analyses)
 
 
+def test_debug_analysis_records_secondary_forecast(tmp_path) -> None:
+    repository = PaperRepository(tmp_path / "paper.sqlite3")
+
+    class MultiForecastSelector:
+        def select(self, city, target_date):
+            primary = Forecast(
+                city_slug=city.slug,
+                station=city.station,
+                target_date=target_date,
+                value=Decimal("64.5"),
+                source="open-meteo:ecmwf_ifs025",
+            )
+            secondary = Forecast(
+                city_slug=city.slug,
+                station=city.station,
+                target_date=target_date,
+                value=Decimal("65.0"),
+                source="visual-crossing:timeline",
+            )
+            return ForecastSelection(
+                forecast=primary,
+                reason="first_available_provider",
+                disagreement=Decimal("0.5"),
+                forecasts=(primary, secondary),
+            )
+
+    bot = PaperWeatherBot(
+        gateway=FakeGateway(),
+        repository=repository,
+        strategy_settings=strategy_settings(),
+        forecast_selector=MultiForecastSelector(),
+        now=lambda: datetime(2026, 10, 31, 12, tzinfo=timezone.utc),
+        debug_analysis=True,
+    )
+
+    bot.scan_once()
+
+    analysis = repository.latest_market_analyses()[0]
+    assert analysis["secondary_forecast_value"] == "65.0"
+    assert analysis["secondary_forecast_source"] == "visual-crossing:timeline"
+    assert analysis["forecast_disagreement"] == "0.5"
+
+
 def test_paper_scan_is_idempotent_and_respects_exposure(tmp_path) -> None:
     repository = PaperRepository(tmp_path / "paper.sqlite3")
     bot = paper_bot(repository)

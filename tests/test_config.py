@@ -62,3 +62,12 @@ def test_paper_strategy_settings_read_profit_constraints_from_json(tmp_path) -> 
     assert strategy.starting_balance == Decimal(1000)
     assert strategy.max_bet == Decimal(25)
     assert strategy.min_hours == Decimal(2)
+
+
+def test_paper_strategy_settings_loads_visual_crossing_key(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text('{"vc_key": "test-visual-crossing-key"}')
+
+    strategy = load_paper_strategy_settings(config_path)
+
+    assert strategy.visual_crossing_key == "test-visual-crossing-key"

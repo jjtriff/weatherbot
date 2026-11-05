@@ -420,6 +420,18 @@ class PaperWeatherBot:
         if not self._debug_analysis:
             return
         resolution_rule, resolution_source, resolution_station = _resolution_metadata(market)
+        secondary_forecast = (
+            next(
+                (
+                    forecast
+                    for forecast in selection.forecasts
+                    if forecast.source != selection.forecast.source
+                ),
+                None,
+            )
+            if selection
+            else None
+        )
         self._repository.record_market_analysis(
             scan_id=scan_id,
             scanned_at=scanned_at,
@@ -432,6 +444,9 @@ class PaperWeatherBot:
             hours_to_settlement=hours_to_settlement,
             forecast_value=selection.forecast.value if selection else None,
             forecast_source=selection.forecast.source if selection else None,
+            secondary_forecast_value=secondary_forecast.value if secondary_forecast else None,
+            secondary_forecast_source=secondary_forecast.source if secondary_forecast else None,
+            forecast_disagreement=selection.disagreement if selection else None,
             probability=probability,
             quote=quote,
             quote_source=quote_source,

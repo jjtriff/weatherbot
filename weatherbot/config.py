@@ -53,6 +53,7 @@ class PaperStrategySettings:
     max_hours: Decimal
     max_spread: Decimal
     kelly_fraction: Decimal
+    visual_crossing_key: str | None = None
 
 
 def _decimal(environ: Mapping[str, str], key: str, default: Decimal) -> Decimal:
@@ -92,6 +93,9 @@ def load_paper_strategy_settings(path: Path) -> PaperStrategySettings:
         raise ConfigurationError(f"cannot read paper strategy config: {path}") from exc
     if not isinstance(payload, Mapping):
         raise ConfigurationError("paper strategy config must be a JSON object")
+    raw_visual_crossing_key = payload.get("vc_key")
+    if raw_visual_crossing_key is not None and not isinstance(raw_visual_crossing_key, str):
+        raise ConfigurationError("config.json vc_key must be a string")
     settings = PaperStrategySettings(
         starting_balance=_json_decimal(payload, "balance", DEFAULT_STARTING_BALANCE),
         max_bet=_json_decimal(payload, "max_bet", DEFAULT_MAX_BET),
@@ -102,6 +106,7 @@ def load_paper_strategy_settings(path: Path) -> PaperStrategySettings:
         max_hours=_json_decimal(payload, "max_hours", Decimal(999999)),
         max_spread=_json_decimal(payload, "max_slippage", DEFAULT_MAX_SPREAD),
         kelly_fraction=_json_decimal(payload, "kelly_fraction", DEFAULT_KELLY_FRACTION),
+        visual_crossing_key=raw_visual_crossing_key.strip() if raw_visual_crossing_key else None,
     )
     if settings.starting_balance <= 0 or settings.max_bet <= 0:
         raise ConfigurationError("paper strategy balance and max_bet must be positive")
